@@ -1,14 +1,14 @@
-// this is the migration runner that sander asked for: using node-pg-migrate
+// Migration runner using node-pg-migrate
 import { runner } from 'node-pg-migrate';
 import dotenv from 'dotenv';
 dotenv.config();
 
-// this runs our pending migrations safely
+// Run pending database migrations safely
 export async function runMigrations() {
-  // this connects using our database url from env
+  // Connect using the database URL from the environment
   const databaseUrl = process.env.DATABASE_URL || 'postgres://qurated:qurated_dev_password@127.0.0.1:5433/qurated_db';
 
-  // running migrations up safely without dropping anything
+  // Apply pending migrations without destructive schema drops
   await runner({
     databaseUrl,
     dir: 'migrations',
@@ -18,7 +18,7 @@ export async function runMigrations() {
   });
 }
 
-// run if called directly
+// Run when executed directly
 runMigrations().catch((err) => {
   console.error('Migration failed:', err);
   process.exit(1);
