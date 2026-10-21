@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Zod Schema Definition: This schema validates the shape and data types of each
-// parsed row from the CSV. Using Zod guarantees we don't accidentally ingest corrupted
+// parsed row from the CSV. Using Zod guarantees I don't accidentally ingest corrupted
 // or improperly formatted product data into the database.
 const ProductSchema = z.object({
   sku: z.string().trim().min(1, "SKU is required"), // SKU must be non-empty
@@ -68,7 +68,7 @@ export const parseCsvFile = (targetPath, options = {}) => {
           stock: row.voorraad ? parseInt(row.voorraad, 10) : -1 // Use -1 to purposely fail Zod validation if missing
         };
 
-        // Validate the mapped object against our Zod schema
+        // Validate the mapped object against the Zod schema
         const result = ProductSchema.safeParse(mappedRecord);
 
         if (result.success) {

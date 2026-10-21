@@ -1,12 +1,12 @@
-// this will make sure its safe: blocking local files and private IPs
+// Block SSRF attempts by preventing connections to local files and private IP ranges
 
-// checking if host is a local machine or private network address
+// Check if a hostname resolves to a loopback, local machine, or private network range
 export function isPrivateOrLocalHost(hostname) {
   if (!hostname || typeof hostname !== 'string') return true;
 
   const host = hostname.trim().toLowerCase();
 
-  // blocking localhost and loopback names
+  // Block localhost and loopback names
   if (
     host === 'localhost' ||
     host === '127.0.0.1' ||
@@ -17,12 +17,12 @@ export function isPrivateOrLocalHost(hostname) {
     return true;
   }
 
-  // blocking internal domain suffixes
+  // Block internal domain suffixes
   if (host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.localhost')) {
     return true;
   }
 
-  // checking ipv4 octets against private ranges
+  // Check IPv4 octets against private network ranges
   const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (ipv4Match) {
     const o1 = parseInt(ipv4Match[1], 10);
@@ -54,7 +54,7 @@ export function isPrivateOrLocalHost(hostname) {
   return false;
 }
 
-// validating that a url only uses http, https, or ftp and does not target private IPs
+// Validate that a URL only uses http, https, or ftp and does not target private IPs
 export function validateSafeUrl(urlString) {
   if (!urlString || typeof urlString !== 'string') {
     throw new Error('URL must be a non-empty string');
@@ -63,7 +63,7 @@ export function validateSafeUrl(urlString) {
   const trimmed = urlString.trim();
   const lower = trimmed.toLowerCase();
 
-  // this will make sure its safe: strictly reject local file schemes, drive letters, and relative/absolute filesystem paths
+  // Strictly reject local file schemes, Windows drive letters, and relative/absolute filesystem paths
   if (
     lower.startsWith('file:') ||
     trimmed.startsWith('/') ||
@@ -74,7 +74,7 @@ export function validateSafeUrl(urlString) {
     throw new Error('Local file paths and file:// schemes are strictly prohibited');
   }
 
-  // enforcing that connection url must be a valid absolute URI with http://, https://, or ftp://
+  // Enforce that connection url must be a valid absolute URI with http://, https://, or ftp://
   if (
     !lower.startsWith('http://') &&
     !lower.startsWith('https://') &&
@@ -90,18 +90,18 @@ export function validateSafeUrl(urlString) {
     throw new Error(`Invalid URL format: ${err.message}`);
   }
 
-  // allow only http, https, and ftp protocols
+  // Allow only http, https, and ftp protocols
   const allowed = ['http:', 'https:', 'ftp:'];
   if (!allowed.includes(parsed.protocol.toLowerCase())) {
     throw new Error(`Protocol '${parsed.protocol}' is not allowed. Only http://, https://, and ftp:// are supported.`);
   }
 
-  // ensuring a valid hostname exists
+  // Ensure a valid hostname exists
   if (!parsed.hostname) {
     throw new Error('URL must contain a valid hostname');
   }
 
-  // reject private or internal hostnames and IP addresses
+  // Reject private or internal hostnames and IP addresses
   if (isPrivateOrLocalHost(parsed.hostname)) {
     throw new Error(`Access to private, localhost, or internal host '${parsed.hostname}' is blocked for security.`);
   }

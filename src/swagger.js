@@ -52,6 +52,36 @@ export const swaggerDocument = {
           error_message: { type: 'string', nullable: true },
         },
       },
+      ProductModelAttribute: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          model_id: { type: 'string', format: 'uuid' },
+          name: { type: 'string' },
+          data_type: { type: 'string', enum: ['string', 'number', 'boolean', 'enum'] },
+          is_required: { type: 'boolean', default: false },
+          list_of_values: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      ProductModel: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          merchant_id: { type: 'string', format: 'uuid', nullable: true },
+          name: { type: 'string' },
+          description: { type: 'string', nullable: true },
+          status: { type: 'string', enum: ['ACTIVE', 'ARCHIVED'] },
+          schema_version: { type: 'integer', default: 1 },
+          created_by: { type: 'string' },
+          updated_by: { type: 'string' },
+          created_at: { type: 'string', format: 'date-time' },
+          updated_at: { type: 'string', format: 'date-time' },
+          attributes: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/ProductModelAttribute' },
+          },
+        },
+      },
     },
   },
   paths: {
@@ -227,6 +257,87 @@ export const swaggerDocument = {
         tags: ['Utility & Testing'],
         parameters: [{ in: 'path', name: 'documentId', required: true, schema: { type: 'string' } }],
         responses: { 200: { description: 'Lineage data' } }
+      }
+    },
+    '/models': {
+      get: {
+        summary: 'List product models available to merchant (including global templates)',
+        tags: ['Models'],
+        parameters: [{ $ref: '#/components/parameters/MerchantIdHeader' }],
+        responses: { 200: { description: 'List of models' } }
+      },
+      post: {
+        summary: 'Create a new product model',
+        tags: ['Models'],
+        parameters: [{ $ref: '#/components/parameters/MerchantIdHeader' }],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name'],
+                properties: {
+                  name: { type: 'string', minLength: 3, maxLength: 255 },
+                  description: { type: 'string', nullable: true },
+                  attributes: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      required: ['name', 'data_type'],
+                      properties: {
+                        name: { type: 'string' },
+                        data_type: { type: 'string', enum: ['string', 'number', 'boolean', 'enum'] },
+                        is_required: { type: 'boolean', default: false },
+                        list_of_values: { type: 'array', items: { type: 'string' } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: { 201: { description: 'Created model' }, 400: { description: 'Validation error' } }
+      }
+    },
+    '/models/{id}': {
+      get: {
+        summary: 'Get product model by ID',
+        tags: ['Models'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }
+        ],
+        responses: { 200: { description: 'Product model details' }, 403: { description: 'Forbidden' }, 404: { description: 'Not found' } }
+      },
+      put: {
+        summary: 'Update an existing product model',
+        tags: ['Models'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }
+        ],
+        responses: { 200: { description: 'Updated model' }, 403: { description: 'Forbidden: Global template or other merchant' }, 404: { description: 'Not found' } }
+      },
+      delete: {
+        summary: 'Soft-delete a product model (status = ARCHIVED)',
+        tags: ['Models'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }
+        ],
+        responses: { 200: { description: 'Model archived' }, 403: { description: 'Forbidden: Global template or other merchant' }, 404: { description: 'Not found' } }
+      }
+    },
+    '/models/{templateId}/clone': {
+      post: {
+        summary: 'Clone a global template or existing model into merchant namespace',
+        tags: ['Models'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'templateId', required: true, schema: { type: 'string', format: 'uuid' } }
+        ],
+        responses: { 201: { description: 'Cloned model' }, 403: { description: 'Forbidden' }, 404: { description: 'Not found' } }
       }
     }
   },
