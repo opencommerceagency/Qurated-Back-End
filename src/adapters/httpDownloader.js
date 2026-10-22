@@ -1,37 +1,34 @@
 import { PassThrough } from 'stream';
 import { validateSafeUrl } from '../utils/urlValidator.js';
 
-// this is the fetch: downloading the remote supplier stream
+// Streams remote CSV / data over HTTP/HTTPS
 export async function downloadHttpStream(connectionConfig) {
-  // this will make sure its safe: blocking local files and private IPs
+  // Block SSRF and private IP ranges
   validateSafeUrl(connectionConfig?.url);
 
-  // setup an abort controller to enforce a 15-second timeout on the request
+  // Set up an abort controller to enforce a 15-second timeout on the request
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
 
   try {
-    // Initiate the HTTP request
     const res = await fetch(connectionConfig.url, {
       signal: controller.signal
     });
 
-    // Clear the timeout since we received the initial response
+    // Clear the timeout since the initial response was received
     clearTimeout(timeoutId);
 
-    // Check if the response status is OK (2xx)
     if (!res.ok) {
       throw new Error(`HTTP Error: ${res.status}`);
     }
 
-    // Inspect Content-Type header to ensure we didn't receive an HTML page
+    // Inspect Content-Type header to ensure the supplier didn't return an HTML error page
     const contentType = res.headers.get('content-type') || '';
     if (contentType.includes('text/html')) {
       throw new Error('Supplier returned an HTML page instead of a CSV');
     }
 
-    // Get the response body as a ReadableStream reader
-    // We need to peek at the first chunk to ensure it's not HTML
+    // I peek at the first chunk to ensure the supplier didn't return HTML disguised as a 200
     const reader = res.body.getReader();
     const { value: firstChunk, done } = await reader.read();
     
@@ -42,21 +39,18 @@ export async function downloadHttpStream(connectionConfig) {
       return emptyStream;
     }
 
-    // Convert the first chunk (Uint8Array) to a string to inspect it
+    // Inspect the decoded beginning for HTML tags
     const chunkString = new TextDecoder().decode(firstChunk);
-    
-    // Check if the string begins with HTML tags like '<!DOCTYPE' or '<html'
     if (chunkString.trimStart().startsWith('<')) {
       throw new Error('Supplier returned an HTML page instead of a CSV');
     }
 
-    // Since the data looks valid, create a PassThrough stream
     const outputStream = new PassThrough();
 
-    // Push the first chunk we peeked at into the stream so no data is lost
+    // Push the peeked chunk into the stream so no data is lost
     outputStream.write(firstChunk);
 
-    // Asynchronously read the remaining chunks and pipe them to our output stream
+    // Pipe the remaining chunks to the output stream
     (async () => {
       try {
         while (true) {
@@ -72,10 +66,8 @@ export async function downloadHttpStream(connectionConfig) {
       }
     })();
 
-    // Return the stream to the caller
     return outputStream;
   } catch (error) {
-    // Ensure timeout is cleared on error
     clearTimeout(timeoutId);
     throw error;
   }

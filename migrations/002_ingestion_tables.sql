@@ -1,5 +1,5 @@
 -- Up Migration
--- this is what sander asked: never dropping tables so we never lose data
+-- Ingestion pipeline tables: normalized and flagged records with tenant indexes
 
 -- 1. ingestion_runs table and indexes
 CREATE TABLE IF NOT EXISTS ingestion_runs (
@@ -54,5 +54,5 @@ CREATE INDEX IF NOT EXISTS idx_normalized_records_merchant_id ON normalized_reco
 CREATE INDEX IF NOT EXISTS idx_normalized_records_sku ON normalized_records(sku);
 
 -- Down Migration
--- this removes the normalized records table on rollback
+-- Down migration: drops normalized_records table on rollback
 DROP TABLE IF EXISTS normalized_records;
