@@ -1,5 +1,11 @@
 import { pool } from '../db/index.js';
-import { createModelSchema, updateModelSchema } from '../validations/modelSchema.js';
+import {
+  createModelSchema,
+  updateModelSchema,
+  createAttributeSchema,
+  updateAttributeSchema,
+  slugifyKey
+} from '../schemas/modelSchema.js';
 
 // Catch malformed UUIDs early before hitting Postgres
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -98,16 +104,21 @@ export async function createModel(req, res) {
       const insertedAttributes = [];
       if (attributes && attributes.length > 0) {
         for (const attr of attributes) {
+          const key = attr.key || slugifyKey(attr.name);
+          const allowedJson = JSON.stringify(attr.allowed_values || attr.list_of_values || []);
           const attrResult = await client.query(
-            `INSERT INTO product_model_attributes (model_id, name, data_type, is_required, list_of_values)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING *`,
             [
               newModel.id,
               attr.name,
+              key,
               attr.data_type,
               attr.is_required ?? false,
-              JSON.stringify(attr.list_of_values ?? [])
+              attr.unit_type ?? null,
+              allowedJson,
+              allowedJson
             ]
           );
           insertedAttributes.push(attrResult.rows[0]);
@@ -179,16 +190,21 @@ export async function updateModel(req, res) {
         // Swap out the old attributes with the new set atomically
         await client.query('DELETE FROM product_model_attributes WHERE model_id = $1', [id]);
         for (const attr of attributes) {
+          const key = attr.key || slugifyKey(attr.name);
+          const allowedJson = JSON.stringify(attr.allowed_values || attr.list_of_values || []);
           const attrRes = await client.query(
-            `INSERT INTO product_model_attributes (model_id, name, data_type, is_required, list_of_values)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING *`,
             [
               id,
               attr.name,
+              key,
               attr.data_type,
               attr.is_required ?? false,
-              JSON.stringify(attr.list_of_values ?? [])
+              attr.unit_type ?? null,
+              allowedJson,
+              allowedJson
             ]
           );
           currentAttributes.push(attrRes.rows[0]);
@@ -287,8 +303,8 @@ export async function cloneModel(req, res) {
 
     // Snapshot all parent attributes into fresh rows pointing to the new model
     const clonedAttributesResult = await client.query(
-      `INSERT INTO product_model_attributes (model_id, name, data_type, is_required, list_of_values)
-       SELECT $1, name, data_type, is_required, list_of_values
+      `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
+       SELECT $1, name, key, data_type, is_required, unit_type, list_of_values, allowed_values
        FROM product_model_attributes
        WHERE model_id = $2
        RETURNING *`,
@@ -382,6 +398,234 @@ export async function getModels(req, res) {
   }
 }
 
+// ==========================================
+// User Story B2.2: Attribute CRUD Handlers
+// ==========================================
+
+// Add a single attribute to an existing model (Task 4)
+export async function addModelAttribute(req, res) {
+  try {
+    const { id: modelId } = req.params;
+    const merchantId = req.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants to avoid leaking resource existence)
+    try {
+      await verifyModelAccess(modelId, merchantId, true);
+    } catch (err) {
+      if (err.status === 403 && err.message.includes('other merchants')) {
+        return res.status(404).json({ error: 'Model not found' });
+      }
+      throw err;
+    }
+
+    const parseResult = createAttributeSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const firstError = parseResult.error.issues[0]?.message || 'Validation error';
+      return res.status(400).json({ error: firstError, details: parseResult.error.flatten() });
+    }
+
+    const attr = parseResult.data;
+    const key = attr.key || slugifyKey(attr.name);
+    const allowedJson = JSON.stringify(attr.allowed_values || attr.list_of_values || []);
+
+    const result = await pool.query(
+      `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        modelId,
+        attr.name,
+        key,
+        attr.data_type,
+        attr.is_required ?? false,
+        attr.unit_type ?? null,
+        allowedJson,
+        allowedJson
+      ]
+    );
+
+    return res.status(201).json(result.rows[0]);
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  }
+}
+
+// Update an existing attribute on a model (Task 4)
+export async function updateModelAttribute(req, res) {
+  try {
+    const { id: modelId } = req.params;
+    const attributeId = req.params.attributeId || req.body?.id || req.body?.attribute_id || req.query?.attributeId;
+    const merchantId = req.merchantId || req.headers['x-merchant-id'];
+
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    if (!attributeId || !UUID_REGEX.test(attributeId)) {
+      return res.status(404).json({ error: 'Attribute not found' });
+    }
+
+    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants to avoid leaking resource existence)
+    try {
+      await verifyModelAccess(modelId, merchantId, true);
+    } catch (err) {
+      if (err.status === 403 && err.message.includes('other merchants')) {
+        return res.status(404).json({ error: 'Attribute not found' });
+      }
+      throw err;
+    }
+
+    // Verify attribute exists and belongs to this model
+    const existingAttrRes = await pool.query(
+      'SELECT * FROM product_model_attributes WHERE id = $1 AND model_id = $2',
+      [attributeId, modelId]
+    );
+
+    if (existingAttrRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Attribute not found' });
+    }
+
+    const existingAttr = existingAttrRes.rows[0];
+
+    const parseResult = updateAttributeSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const firstError = parseResult.error.issues[0]?.message || 'Validation error';
+      return res.status(400).json({ error: firstError, details: parseResult.error.flatten() });
+    }
+
+    const data = parseResult.data;
+    const newName = data.name !== undefined ? data.name : existingAttr.name;
+    const newKey = data.key !== undefined ? data.key : (data.name ? slugifyKey(data.name) : existingAttr.key);
+    const newDataType = data.data_type !== undefined ? data.data_type : existingAttr.data_type;
+    const newIsRequired = data.is_required !== undefined ? data.is_required : existingAttr.is_required;
+    const newUnitType = data.unit_type !== undefined ? data.unit_type : existingAttr.unit_type;
+
+    let finalAllowedValues = data.allowed_values ?? data.list_of_values;
+    if (finalAllowedValues === undefined) {
+      finalAllowedValues = existingAttr.allowed_values ?? existingAttr.list_of_values ?? [];
+    }
+
+    if (newDataType === 'list_of_values') {
+      if (!Array.isArray(finalAllowedValues) || finalAllowedValues.length === 0) {
+        return res.status(400).json({
+          error: 'allowed_values must be a non-empty array of strings when data_type is list_of_values'
+        });
+      }
+    }
+
+    const valuesJson = JSON.stringify(finalAllowedValues);
+
+    const updateRes = await pool.query(
+      `UPDATE product_model_attributes
+       SET name = $1,
+           key = $2,
+           data_type = $3,
+           is_required = $4,
+           unit_type = $5,
+           list_of_values = $6,
+           allowed_values = $7
+       WHERE id = $8 AND model_id = $9
+       RETURNING *`,
+      [
+        newName,
+        newKey,
+        newDataType,
+        newIsRequired,
+        newUnitType,
+        valuesJson,
+        valuesJson,
+        attributeId,
+        modelId
+      ]
+    );
+
+    return res.status(200).json(updateRes.rows[0]);
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  }
+}
+
+// Delete an attribute from a model (Task 4)
+export async function deleteModelAttribute(req, res) {
+  try {
+    const { id: modelId } = req.params;
+    const attributeId = req.params.attributeId || req.body?.id || req.body?.attribute_id || req.query?.attributeId;
+    const merchantId = req.merchantId || req.headers['x-merchant-id'];
+
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    if (!attributeId || !UUID_REGEX.test(attributeId)) {
+      return res.status(404).json({ error: 'Attribute not found' });
+    }
+
+    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants to avoid leaking resource existence)
+    try {
+      await verifyModelAccess(modelId, merchantId, true);
+    } catch (err) {
+      if (err.status === 403 && err.message.includes('other merchants')) {
+        return res.status(404).json({ error: 'Attribute not found' });
+      }
+      throw err;
+    }
+
+    const deleteRes = await pool.query(
+      'DELETE FROM product_model_attributes WHERE id = $1 AND model_id = $2 RETURNING id',
+      [attributeId, modelId]
+    );
+
+    if (deleteRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Attribute not found' });
+    }
+
+    return res.status(200).json({
+      message: 'Attribute deleted successfully',
+      id: attributeId
+    });
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  }
+}
+
+// List all attributes of a model
+export async function getModelAttributes(req, res) {
+  try {
+    const { id: modelId } = req.params;
+    const merchantId = req.merchantId || req.headers['x-merchant-id'];
+
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    // Read access check: merchant can read their own models and shared templates
+    try {
+      await verifyModelAccess(modelId, merchantId, false);
+    } catch (err) {
+      if (err.status === 403 && err.message.includes('other merchants')) {
+        return res.status(404).json({ error: 'Model not found' });
+      }
+      throw err;
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM product_model_attributes WHERE model_id = $1 ORDER BY name ASC',
+      [modelId]
+    );
+
+    return res.status(200).json({ attributes: result.rows });
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  }
+}
+
 export default {
   verifyModelAccess,
   createModel,
@@ -389,5 +633,9 @@ export default {
   deleteModel,
   cloneModel,
   getModelById,
-  getModels
+  getModels,
+  addModelAttribute,
+  updateModelAttribute,
+  deleteModelAttribute,
+  getModelAttributes
 };

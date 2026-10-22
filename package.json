@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "node --test tests/*.test.js",
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
@@ -26,6 +27,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "iconv-lite": "^0.7.3",
+    "node-pg-migrate": "^9.0.0",
     "openai": "^7.15.0",
     "pg": "^8.23.0",
     "sax": "^1.6.1",
@@ -33,7 +35,6 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "eslint": "^10.12.0",
-    "node-pg-migrate": "^9.0.0"
+    "eslint": "^10.12.0"
   }
 }

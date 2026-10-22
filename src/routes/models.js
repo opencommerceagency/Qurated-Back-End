@@ -7,7 +7,11 @@ import {
   deleteModel,
   cloneModel,
   getModelById,
-  getModels
+  getModels,
+  addModelAttribute,
+  updateModelAttribute,
+  deleteModelAttribute,
+  getModelAttributes
 } from '../controllers/modelController.js';
 
 const router = Router();
@@ -37,7 +41,15 @@ router.use((req, res, next) => {
   next();
 });
 
-// CRUD and template cloning routes
+// Attribute endpoints for User Story B2.2 (Task 4)
+router.get('/:id/attributes', getModelAttributes);
+router.post('/:id/attributes', addModelAttribute);
+router.put('/:id/attributes/:attributeId', updateModelAttribute);
+router.put('/:id/attributes', updateModelAttribute);
+router.delete('/:id/attributes/:attributeId', deleteModelAttribute);
+router.delete('/:id/attributes', deleteModelAttribute);
+
+// Model CRUD and template cloning routes
 router.get('/', getModels);
 router.post('/', createModel);
 router.get('/:id', getModelById);
