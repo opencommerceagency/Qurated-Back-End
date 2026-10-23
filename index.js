@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { parseCsvFile } from './src/ingest-csv.js';
 import { pool } from './src/db/index.js';
 import sourceRoutes from './src/routes/sources.js';
+import modelRoutes from './src/routes/models.js';
 import { startCronWorker } from './src/workers/cron.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerDocument } from './src/swagger.js';
@@ -15,13 +16,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config();
 
-// Purpose: Boots up the Qurated API server and gets everything ready.
-// Pseudocode: 
-// 1. Set up Express and basic tools like CORS and JSON parsing.
-// 2. Hook up our source and extraction routes.
-// 3. Connect to the database.
-// 4. Start the background cron worker to listen for scheduled jobs.
-// 5. Start listening for incoming web requests on the specified port.
+// Boots up the Qurated API server.
+// I configure middleware, mount the routes, connect to PostgreSQL,
+// and start the background cron scheduler.
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -38,11 +35,12 @@ import { authenticateApi } from './src/middleware/auth.js';
 // Expose Swagger UI
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
-// this will make sure its safe: protecting all /api/* routes
+// Protect all /api endpoints with authentication
 app.use('/api', authenticateApi);
 
 // Routes
 app.use('/api/sources', sourceRoutes);
+app.use('/api/models', modelRoutes);
 
 app.get('/health', (req, res) => {
     res.json({
@@ -110,8 +108,7 @@ app.listen(port, async () => {
         const res = await pool.query('SELECT NOW()');
         console.log(`Database connected successfully at ${res.rows[0].now}`);
 
-        // Scenario 4: Server Restart & Zombie Lock Recovery
-        // Release any locks held by runs that were interrupted by a restart
+        // Release any zombie locks held by ingestion runs that were interrupted if the server restarted mid-sync
         const recoveryRes = await pool.query(
             "UPDATE ingestion_runs SET status = 'FAILED', error_message = 'Terminated unexpectedly due to server restart', finished_at = NOW() WHERE status = 'PROCESSING' RETURNING id"
         );

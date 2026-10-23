@@ -6,7 +6,7 @@ import sourceRouter from '../src/routes/sources.js';
 import { validateSafeUrl } from '../src/utils/urlValidator.js';
 import { sourceCreateSchema } from '../src/schemas/sourceSchema.js';
 
-// this will make sure its safe: ensuring test environment has valid dummy credentials
+// Ensure test environment has valid dummy credentials
 process.env.API_KEY = process.env.API_KEY || 'qurated_dev_api_key_2026';
 process.env.API_AUTH_USER = process.env.API_AUTH_USER || 'admin';
 process.env.API_AUTH_PASS = process.env.API_AUTH_PASS || 'qurated_dev_password';
@@ -43,7 +43,7 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
   });
 
   it('GET /api/sources should reject requests missing an API key with 401 Unauthorized', async () => {
-    // this will make sure its safe: rejecting unauthenticated callers
+    // Reject unauthenticated requests
     const res = await fetch(baseUrl, {
       headers: { 'x-merchant-id': merchantA }
     });
@@ -54,15 +54,11 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
   });
 
   it('GET /api/sources should fail closed with 500 if server auth is unconfigured', async () => {
-    // this will make sure its safe: fail closed when auth credentials are missing in env
+    // Fail closed when API_KEY is missing in env
     const savedApiKey = process.env.API_KEY;
-    const savedUser = process.env.API_AUTH_USER;
-    const savedPass = process.env.API_AUTH_PASS;
 
     try {
       delete process.env.API_KEY;
-      delete process.env.API_AUTH_USER;
-      delete process.env.API_AUTH_PASS;
 
       const res = await fetch(baseUrl, {
         headers: {
@@ -76,17 +72,16 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
       assert.strictEqual(data.error, 'Server authentication misconfiguration');
     } finally {
       process.env.API_KEY = savedApiKey;
-      process.env.API_AUTH_USER = savedUser;
-      process.env.API_AUTH_PASS = savedPass;
     }
   });
 
   it('GET /api/sources should reject missing or invalid x-merchant-id header with 400 Bad Request', async () => {
-    // this will make sure its safe: rejecting missing or non-UUID merchant IDs
+    // Reject missing or non-UUID merchant IDs
     const testCases = [
       { name: 'missing header', headers: { 'x-api-key': validApiKey } },
       { name: 'numeric id', headers: { 'x-api-key': validApiKey, 'x-merchant-id': '1' } },
       { name: 'arbitrary string', headers: { 'x-api-key': validApiKey, 'x-merchant-id': 'test' } },
+      { name: 'test-tenant string', headers: { 'x-api-key': validApiKey, 'x-merchant-id': 'test-tenant' } },
       { name: 'sql injection attempt', headers: { 'x-api-key': validApiKey, 'x-merchant-id': "' OR 1=1" } },
       { name: 'short uuid', headers: { 'x-api-key': validApiKey, 'x-merchant-id': '12345' } }
     ];
@@ -100,7 +95,7 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
   });
 
   it('POST /api/sources should reject SSRF attempts with local file or private IP URLs', async () => {
-    // this will make sure its safe: blocking local files and private IPs
+    // Block local files and private IPs
     const privateIpPayload = {
       name: 'Malicious Source',
       type: 'csv',
@@ -134,10 +129,27 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
       body: JSON.stringify(filePayload)
     });
     assert.strictEqual(res2.status, 400);
+
+    const windowsPathPayload = {
+      name: 'Windows Path Source',
+      type: 'csv',
+      connection_config: { url: 'C:\\secrets.csv' }
+    };
+
+    const res3 = await fetch(baseUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-merchant-id': merchantA,
+        'x-api-key': validApiKey
+      },
+      body: JSON.stringify(windowsPathPayload)
+    });
+    assert.strictEqual(res3.status, 400);
   });
 
   it('POST /api/sources should mask sensitive credentials in 201 response and store protocol', async () => {
-    // this is what sander asked: keeping format and protocol strictly separate
+    // Keep format and protocol strictly separate
     const payload = {
       name: 'Hardware Supplier API Test',
       type: 'csv',
@@ -170,7 +182,7 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
     assert.strictEqual(data.name, payload.name);
     assert.strictEqual(data.type, 'csv');
     assert.strictEqual(data.protocol, 'HTTP');
-    // this will make sure its safe: masking credentials in response
+    // Verify credential masking in response
     assert.strictEqual(data.connection_config.password, '********');
     assert.strictEqual(data.connection_config.api_key, '********');
     assert.strictEqual(data.connection_config.token, '********');
@@ -229,7 +241,7 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
   });
 
   it('PUT /api/sources/:id with empty body should not leak cleartext credentials', async () => {
-    // this will make sure its safe: even empty updates never echo unmasked credentials
+    // Empty updates must never echo unmasked credentials
     const res = await fetch(`${baseUrl}/${createdSourceId}`, {
       method: 'PUT',
       headers: {
@@ -266,7 +278,7 @@ describe('Source API Endpoints & Security (Milestone B1 Fixes)', () => {
   });
 
   it('should validate URLs and reject all local filesystem paths and file schemes', async () => {
-    // this will make sure its safe: unit testing rejection of local paths in validator and schema
+    // Reject local paths in validator and schema
     const invalidUrls = [
       'file:///etc/passwd',
       'file://C:/data/feed.csv',

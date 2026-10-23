@@ -1,4 +1,4 @@
-// this is the eslint config for clean code and 0 errors
+// I configure ESLint here to ensure clean code and zero runtime undefined issues
 export default [
   {
     files: ['**/*.js'],

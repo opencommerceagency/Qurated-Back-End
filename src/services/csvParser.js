@@ -240,7 +240,7 @@ export async function ingestCsvStream(stream, source, merchantId, runId) {
         });
       }
 
-      // saving in batches of 500 so memory stays low
+      // Flush in batches of 500 to keep memory usage low
       if (cleanBatch.length >= BATCH_SIZE) {
         await flushCleanBatch();
       }
