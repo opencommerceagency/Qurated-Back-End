@@ -472,4 +472,182 @@ describe('Milestone B2.1: Product Model Lifecycle & Template Cloning', () => {
       assert.ok(!data.models.some((m) => m.id === merchantAModelId));
     });
   });
+
+  describe('7. Schema Versioning & Lineage Retrieval (User Story B2.3)', () => {
+    let versionTestModelId;
+    let testAttrId;
+
+    it('Scenario 1: Version increment on schema updates (POST, PUT, DELETE attribute)', async () => {
+      // 1. Create a model for Merchant A (starts at schema_version = 1 with initial attribute)
+      const createRes = await fetch(baseUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          name: 'Versioning Precision Model',
+          description: 'Model for testing schema version increments and historical snapshots',
+          attributes: [
+            { name: 'Initial Code', key: 'initial_code', data_type: 'string', is_required: true }
+          ]
+        })
+      });
+
+      assert.strictEqual(createRes.status, 201);
+      const modelData = await createRes.json();
+      versionTestModelId = modelData.id;
+      createdModelIds.push(versionTestModelId);
+      assert.strictEqual(modelData.schema_version, 1);
+      assert.strictEqual(modelData.attributes.length, 1);
+
+      // 2. Add an attribute (schema_version should increment from 1 to 2)
+      const addAttrRes = await fetch(`${baseUrl}/${versionTestModelId}/attributes`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          name: 'Batch Number',
+          key: 'batch_number',
+          data_type: 'integer',
+          is_required: false
+        })
+      });
+      assert.strictEqual(addAttrRes.status, 201);
+      const addedAttr = await addAttrRes.json();
+      testAttrId = addedAttr.id;
+
+      // Check model schema_version is now 2
+      const modelV2Res = await fetch(`${baseUrl}/${versionTestModelId}`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(modelV2Res.status, 200);
+      const modelV2 = await modelV2Res.json();
+      assert.strictEqual(modelV2.schema_version, 2);
+      assert.strictEqual(modelV2.attributes.length, 2);
+
+      // 3. Update an attribute (schema_version should increment from 2 to 3)
+      const updateAttrRes = await fetch(`${baseUrl}/${versionTestModelId}/attributes/${testAttrId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          name: 'Batch Number Updated',
+          is_required: true
+        })
+      });
+      assert.strictEqual(updateAttrRes.status, 200);
+
+      const modelV3Res = await fetch(`${baseUrl}/${versionTestModelId}`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      const modelV3 = await modelV3Res.json();
+      assert.strictEqual(modelV3.schema_version, 3);
+
+      // 4. Delete an attribute (schema_version should increment from 3 to 4)
+      const deleteAttrRes = await fetch(`${baseUrl}/${versionTestModelId}/attributes/${testAttrId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          id: testAttrId
+        })
+      });
+      assert.strictEqual(deleteAttrRes.status, 200);
+
+      const modelV4Res = await fetch(`${baseUrl}/${versionTestModelId}`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      const modelV4 = await modelV4Res.json();
+      assert.strictEqual(modelV4.schema_version, 4);
+      assert.strictEqual(modelV4.attributes.length, 1);
+    });
+
+    it('Scenario 2: Querying historical versions with GET /api/models/:id?version=:version', async () => {
+      // Query version 1: should have exactly 1 attribute ('initial_code') and schema_version = 1
+      const v1Res = await fetch(`${baseUrl}/${versionTestModelId}?version=1`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(v1Res.status, 200);
+      const v1Data = await v1Res.json();
+      assert.strictEqual(v1Data.schema_version, 1);
+      assert.strictEqual(v1Data.attributes.length, 1);
+      assert.strictEqual(v1Data.attributes[0].key, 'initial_code');
+
+      // Query version 2: should have 2 attributes (initial_code, batch_number) and schema_version = 2
+      const v2Res = await fetch(`${baseUrl}/${versionTestModelId}?version=2`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(v2Res.status, 200);
+      const v2Data = await v2Res.json();
+      assert.strictEqual(v2Data.schema_version, 2);
+      assert.strictEqual(v2Data.attributes.length, 2);
+
+      // Query without ?version: should default to latest active version (4)
+      const activeRes = await fetch(`${baseUrl}/${versionTestModelId}`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(activeRes.status, 200);
+      const activeData = await activeRes.json();
+      assert.strictEqual(activeData.schema_version, 4);
+    });
+
+    it('Scenario 2: should return 404 when querying a non-existent version', async () => {
+      const res = await fetch(`${baseUrl}/${versionTestModelId}?version=999`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(res.status, 404);
+    });
+
+    it('Scenario 2: should return 400 when version query parameter is malformed', async () => {
+      const res = await fetch(`${baseUrl}/${versionTestModelId}?version=invalid`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(res.status, 400);
+    });
+
+    it('Scenario 3: Merchant B attempting to query Merchant A historical version should be rejected with 403 Forbidden', async () => {
+      const res = await fetch(`${baseUrl}/${versionTestModelId}?version=1`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantB
+        }
+      });
+      assert.strictEqual(res.status, 403);
+    });
+  });
 });

@@ -11,7 +11,8 @@ import {
   addModelAttribute,
   updateModelAttribute,
   deleteModelAttribute,
-  getModelAttributes
+  getModelAttributes,
+  getModelVersions
 } from '../controllers/modelController.js';
 
 const router = Router();
@@ -48,6 +49,9 @@ router.put('/:id/attributes/:attributeId', updateModelAttribute);
 router.put('/:id/attributes', updateModelAttribute);
 router.delete('/:id/attributes/:attributeId', deleteModelAttribute);
 router.delete('/:id/attributes', deleteModelAttribute);
+
+// Version history endpoint for User Story B2.3
+router.get('/:id/versions', getModelVersions);
 
 // Model CRUD and template cloning routes
 router.get('/', getModels);

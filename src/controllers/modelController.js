@@ -70,6 +70,66 @@ export async function verifyModelAccess(modelId, reqMerchantId, requireWriteAcce
   return model;
 }
 
+// Helper: increments parent model schema_version and records a complete snapshot in product_model_versions
+export async function recordVersionSnapshotOnAttributeChange(modelId, client = pool) {
+  // 1. Fetch current model state before incrementing
+  const curModelRes = await client.query('SELECT * FROM product_models WHERE id = $1', [modelId]);
+  if (curModelRes.rows.length === 0) return null;
+  const currentModel = curModelRes.rows[0];
+  const currentVersion = currentModel.schema_version;
+
+  // 2. Ensure previous state snapshot exists for currentVersion
+  const existingVer = await client.query(
+    'SELECT id FROM product_model_versions WHERE model_id = $1 AND version = $2',
+    [modelId, currentVersion]
+  );
+  if (existingVer.rows.length === 0) {
+    const prevAttrRes = await client.query(
+      'SELECT * FROM product_model_attributes WHERE model_id = $1 ORDER BY name ASC',
+      [modelId]
+    );
+    const prevSnapshot = {
+      ...currentModel,
+      attributes: prevAttrRes.rows
+    };
+    await client.query(
+      'INSERT INTO product_model_versions (model_id, version, snapshot) VALUES ($1, $2, $3)',
+      [modelId, currentVersion, JSON.stringify(prevSnapshot)]
+    );
+  }
+
+  // 3. Increment schema_version on product_models
+  const updateRes = await client.query(
+    `UPDATE product_models
+     SET schema_version = schema_version + 1,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [modelId]
+  );
+  const newModel = updateRes.rows[0];
+  const newVersion = newModel.schema_version;
+
+  // 4. Query updated attributes for the model
+  const attrRes = await client.query(
+    'SELECT * FROM product_model_attributes WHERE model_id = $1 ORDER BY name ASC',
+    [modelId]
+  );
+  const newSnapshot = {
+    ...newModel,
+    attributes: attrRes.rows
+  };
+
+  // 5. Insert new version snapshot into product_model_versions
+  await client.query(
+    `INSERT INTO product_model_versions (model_id, version, snapshot)
+     VALUES ($1, $2, $3)`,
+    [modelId, newVersion, JSON.stringify(newSnapshot)]
+  );
+
+  return { newModel, newSnapshot };
+}
+
 // Spin up a brand new product model scoped to the calling merchant
 export async function createModel(req, res) {
   try {
@@ -124,6 +184,16 @@ export async function createModel(req, res) {
           insertedAttributes.push(attrResult.rows[0]);
         }
       }
+
+      // Record initial version 1 snapshot for historical lineage
+      const initialSnapshot = {
+        ...newModel,
+        attributes: insertedAttributes
+      };
+      await client.query(
+        'INSERT INTO product_model_versions (model_id, version, snapshot) VALUES ($1, 1, $2)',
+        [newModel.id, JSON.stringify(initialSnapshot)]
+      );
 
       await client.query('COMMIT');
 
@@ -183,7 +253,7 @@ export async function updateModel(req, res) {
          RETURNING *`,
         [newName, newDesc, newStatus, updatedBy, id, merchantId]
       );
-      const updatedModel = updateResult.rows[0];
+      let updatedModel = updateResult.rows[0];
 
       let currentAttributes = [];
       if (attributes !== undefined) {
@@ -208,6 +278,12 @@ export async function updateModel(req, res) {
             ]
           );
           currentAttributes.push(attrRes.rows[0]);
+        }
+
+        // Whenever attributes are replaced, increment schema_version and snapshot
+        const versionResult = await recordVersionSnapshotOnAttributeChange(id, client);
+        if (versionResult) {
+          updatedModel = versionResult.newModel;
         }
       } else {
         const attrRes = await client.query(
@@ -282,7 +358,7 @@ export async function cloneModel(req, res) {
   const client = await pool.connect();
 
   try {
-    // Using a transaction here to guarantee data consistency. If the attribute deep-copy fails, I roll everything back so I don't end up with an orphaned model.
+    // Using a transaction here to guarantee data consistency.
     await client.query('BEGIN');
 
     // Pass the active client so this access check participates in the same transaction
@@ -311,6 +387,16 @@ export async function cloneModel(req, res) {
       [clonedModel.id, templateId]
     );
 
+    // Save initial version 1 snapshot for the cloned model
+    const cloneSnapshot = {
+      ...clonedModel,
+      attributes: clonedAttributesResult.rows
+    };
+    await client.query(
+      'INSERT INTO product_model_versions (model_id, version, snapshot) VALUES ($1, 1, $2)',
+      [clonedModel.id, JSON.stringify(cloneSnapshot)]
+    );
+
     await client.query('COMMIT');
 
     return res.status(201).json({
@@ -326,7 +412,7 @@ export async function cloneModel(req, res) {
   }
 }
 
-// Fetch a single model along with all of its defined attributes
+// Fetch a single model along with all of its defined attributes (supports optional ?version=:version query)
 export async function getModelById(req, res) {
   try {
     const { id } = req.params;
@@ -335,8 +421,49 @@ export async function getModelById(req, res) {
       return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
     }
 
+    // Access guard applies to both active and historical queries
     const model = await verifyModelAccess(id, merchantId, false);
 
+    const versionParam = req.query.version;
+
+    // Task 3: Historical version retrieval
+    if (versionParam !== undefined && versionParam !== '') {
+      const parsedVersion = parseInt(versionParam, 10);
+      if (isNaN(parsedVersion) || parsedVersion < 1) {
+        return res.status(400).json({ error: 'Invalid version parameter. Must be a positive integer.' });
+      }
+
+      // Query historical snapshot from product_model_versions
+      const versionResult = await pool.query(
+        'SELECT * FROM product_model_versions WHERE model_id = $1 AND version = $2',
+        [id, parsedVersion]
+      );
+
+      if (versionResult.rows.length === 0) {
+        // If the requested version matches the active version but no snapshot row existed yet, snapshot it
+        if (model.schema_version === parsedVersion) {
+          const attrRes = await pool.query(
+            'SELECT * FROM product_model_attributes WHERE model_id = $1 ORDER BY name ASC',
+            [id]
+          );
+          const currentSnapshot = {
+            ...model,
+            attributes: attrRes.rows
+          };
+          await pool.query(
+            'INSERT INTO product_model_versions (model_id, version, snapshot) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+            [id, parsedVersion, JSON.stringify(currentSnapshot)]
+          );
+          return res.status(200).json(currentSnapshot);
+        }
+        return res.status(404).json({ error: `Schema version ${parsedVersion} not found for model ${id}` });
+      }
+
+      const snapshotData = versionResult.rows[0].snapshot;
+      return res.status(200).json(snapshotData);
+    }
+
+    // Default: return current active model and its attributes
     const attrResult = await pool.query(
       'SELECT * FROM product_model_attributes WHERE model_id = $1 ORDER BY name ASC',
       [id]
@@ -399,11 +526,12 @@ export async function getModels(req, res) {
 }
 
 // ==========================================
-// User Story B2.2: Attribute CRUD Handlers
+// User Story B2.2 & B2.3: Attribute CRUD Handlers
 // ==========================================
 
-// Add a single attribute to an existing model (Task 4)
+// Add a single attribute to an existing model (increments schema_version and records snapshot)
 export async function addModelAttribute(req, res) {
+  const client = await pool.connect();
   try {
     const { id: modelId } = req.params;
     const merchantId = req.merchantId || req.headers['x-merchant-id'];
@@ -411,9 +539,9 @@ export async function addModelAttribute(req, res) {
       return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
     }
 
-    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants to avoid leaking resource existence)
+    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants)
     try {
-      await verifyModelAccess(modelId, merchantId, true);
+      await verifyModelAccess(modelId, merchantId, true, client);
     } catch (err) {
       if (err.status === 403 && err.message.includes('other merchants')) {
         return res.status(404).json({ error: 'Model not found' });
@@ -431,7 +559,9 @@ export async function addModelAttribute(req, res) {
     const key = attr.key || slugifyKey(attr.name);
     const allowedJson = JSON.stringify(attr.allowed_values || attr.list_of_values || []);
 
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    const result = await client.query(
       `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
@@ -447,15 +577,24 @@ export async function addModelAttribute(req, res) {
       ]
     );
 
+    // Increment schema_version and record immutable snapshot
+    await recordVersionSnapshotOnAttributeChange(modelId, client);
+
+    await client.query('COMMIT');
+
     return res.status(201).json(result.rows[0]);
   } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
     const status = error.status || error.statusCode || 500;
     return res.status(status).json({ error: error.message });
+  } finally {
+    client.release();
   }
 }
 
-// Update an existing attribute on a model (Task 4)
+// Update an existing attribute on a model (increments schema_version and records snapshot)
 export async function updateModelAttribute(req, res) {
+  const client = await pool.connect();
   try {
     const { id: modelId } = req.params;
     const attributeId = req.params.attributeId || req.body?.id || req.body?.attribute_id || req.query?.attributeId;
@@ -469,9 +608,9 @@ export async function updateModelAttribute(req, res) {
       return res.status(404).json({ error: 'Attribute not found' });
     }
 
-    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants to avoid leaking resource existence)
+    // Enforce cross-tenant isolation: caller must own this model
     try {
-      await verifyModelAccess(modelId, merchantId, true);
+      await verifyModelAccess(modelId, merchantId, true, client);
     } catch (err) {
       if (err.status === 403 && err.message.includes('other merchants')) {
         return res.status(404).json({ error: 'Attribute not found' });
@@ -480,7 +619,7 @@ export async function updateModelAttribute(req, res) {
     }
 
     // Verify attribute exists and belongs to this model
-    const existingAttrRes = await pool.query(
+    const existingAttrRes = await client.query(
       'SELECT * FROM product_model_attributes WHERE id = $1 AND model_id = $2',
       [attributeId, modelId]
     );
@@ -519,7 +658,9 @@ export async function updateModelAttribute(req, res) {
 
     const valuesJson = JSON.stringify(finalAllowedValues);
 
-    const updateRes = await pool.query(
+    await client.query('BEGIN');
+
+    const updateRes = await client.query(
       `UPDATE product_model_attributes
        SET name = $1,
            key = $2,
@@ -543,15 +684,24 @@ export async function updateModelAttribute(req, res) {
       ]
     );
 
+    // Increment schema_version and record immutable snapshot
+    await recordVersionSnapshotOnAttributeChange(modelId, client);
+
+    await client.query('COMMIT');
+
     return res.status(200).json(updateRes.rows[0]);
   } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
     const status = error.status || error.statusCode || 500;
     return res.status(status).json({ error: error.message });
+  } finally {
+    client.release();
   }
 }
 
-// Delete an attribute from a model (Task 4)
+// Delete an attribute from a model (increments schema_version and records snapshot)
 export async function deleteModelAttribute(req, res) {
+  const client = await pool.connect();
   try {
     const { id: modelId } = req.params;
     const attributeId = req.params.attributeId || req.body?.id || req.body?.attribute_id || req.query?.attributeId;
@@ -565,9 +715,9 @@ export async function deleteModelAttribute(req, res) {
       return res.status(404).json({ error: 'Attribute not found' });
     }
 
-    // Enforce cross-tenant isolation: caller must own this model (returns 404 for other merchants to avoid leaking resource existence)
+    // Enforce cross-tenant isolation: caller must own this model
     try {
-      await verifyModelAccess(modelId, merchantId, true);
+      await verifyModelAccess(modelId, merchantId, true, client);
     } catch (err) {
       if (err.status === 403 && err.message.includes('other merchants')) {
         return res.status(404).json({ error: 'Attribute not found' });
@@ -575,22 +725,33 @@ export async function deleteModelAttribute(req, res) {
       throw err;
     }
 
-    const deleteRes = await pool.query(
+    await client.query('BEGIN');
+
+    const deleteRes = await client.query(
       'DELETE FROM product_model_attributes WHERE id = $1 AND model_id = $2 RETURNING id',
       [attributeId, modelId]
     );
 
     if (deleteRes.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Attribute not found' });
     }
+
+    // Increment schema_version and record immutable snapshot
+    await recordVersionSnapshotOnAttributeChange(modelId, client);
+
+    await client.query('COMMIT');
 
     return res.status(200).json({
       message: 'Attribute deleted successfully',
       id: attributeId
     });
   } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
     const status = error.status || error.statusCode || 500;
     return res.status(status).json({ error: error.message });
+  } finally {
+    client.release();
   }
 }
 
@@ -626,8 +787,33 @@ export async function getModelAttributes(req, res) {
   }
 }
 
+// List all historical versions and snapshots for a model
+export async function getModelVersions(req, res) {
+  try {
+    const { id: modelId } = req.params;
+    const merchantId = req.merchantId || req.headers['x-merchant-id'];
+
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    await verifyModelAccess(modelId, merchantId, false);
+
+    const result = await pool.query(
+      'SELECT version, snapshot, created_at FROM product_model_versions WHERE model_id = $1 ORDER BY version DESC',
+      [modelId]
+    );
+
+    return res.status(200).json({ versions: result.rows });
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  }
+}
+
 export default {
   verifyModelAccess,
+  recordVersionSnapshotOnAttributeChange,
   createModel,
   updateModel,
   deleteModel,
@@ -637,5 +823,6 @@ export default {
   addModelAttribute,
   updateModelAttribute,
   deleteModelAttribute,
-  getModelAttributes
+  getModelAttributes,
+  getModelVersions
 };

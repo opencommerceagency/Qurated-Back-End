@@ -3,7 +3,7 @@ export const swaggerDocument = {
   info: {
     title: 'Qurated Backend API',
     version: '1.0.0',
-    description: 'API documentation for the Qurated supplier ingestion and source management system.',
+    description: 'API documentation for the Qurated supplier ingestion, source management, and product data model system.',
   },
   servers: [
     {
@@ -58,8 +58,11 @@ export const swaggerDocument = {
           id: { type: 'string', format: 'uuid' },
           model_id: { type: 'string', format: 'uuid' },
           name: { type: 'string' },
-          data_type: { type: 'string', enum: ['string', 'number', 'boolean', 'enum'] },
+          key: { type: 'string', pattern: '^[a-z0-9_]+$' },
+          data_type: { type: 'string', enum: ['string', 'integer', 'boolean', 'list_of_values'] },
           is_required: { type: 'boolean', default: false },
+          unit_type: { type: 'string', nullable: true },
+          allowed_values: { type: 'array', items: { type: 'string' } },
           list_of_values: { type: 'array', items: { type: 'string' } },
         },
       },
@@ -82,6 +85,16 @@ export const swaggerDocument = {
           },
         },
       },
+      ProductModelVersion: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          model_id: { type: 'string', format: 'uuid' },
+          version: { type: 'integer' },
+          snapshot: { $ref: '#/components/schemas/ProductModel' },
+          created_at: { type: 'string', format: 'date-time' },
+        },
+      },
     },
   },
   paths: {
@@ -99,153 +112,131 @@ export const swaggerDocument = {
         tags: ['Sources'],
         parameters: [{ $ref: '#/components/parameters/MerchantIdHeader' }],
         requestBody: {
-          required: true,
           content: {
             'application/json': {
               schema: {
                 type: 'object',
-                required: ['name', 'type', 'default_model_id'],
+                required: ['name', 'type', 'connection_config'],
                 properties: {
-                  name: { type: 'string', example: 'HVH Local Sample Feed' },
-                  type: { type: 'string', example: 'xml' },
-                  default_model_id: { type: 'string', example: 'google/gemini-flash-1.5' },
-                  connection_config: { type: 'object', properties: { url: { type: 'string', example: 'sample-feed.xml' } } },
-                  schedule_cron: { type: 'string', example: '0 2 * * *' },
+                  name: { type: 'string' },
+                  type: { type: 'string', enum: ['csv', 'xml', 'ftp', 'api'] },
+                  protocol: { type: 'string', enum: ['HTTP', 'FTP'] },
+                  default_model_id: { type: 'string', default: 'google/gemini-flash-1.5' },
+                  connection_config: { type: 'object' },
+                  schedule_cron: { type: 'string', nullable: true },
                 },
-                example: {
-                  name: 'HVH Local Sample Feed',
-                  type: 'csv',
-                  default_model_id: 'google/gemini-flash-1.5',
-                  connection_config: { url: 'https://example.com/feed.csv' },
-                  schedule_cron: '0 2 * * *',
-                  status: 'ACTIVE'
-                }
               },
             },
           },
         },
         responses: {
-          201: { description: 'Source created successfully' },
+          201: { description: 'Created' },
+          400: { description: 'Validation error' },
         },
       },
     },
     '/sources/{id}': {
       get: {
-        summary: 'Get a specific source',
+        summary: 'Get source details by ID',
         tags: ['Sources'],
         parameters: [
           { $ref: '#/components/parameters/MerchantIdHeader' },
           { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } },
         ],
         responses: {
-          200: { description: 'Source details' },
+          200: { description: 'Source details with masked credentials' },
+          404: { description: 'Source not found' },
         },
       },
       put: {
-        summary: 'Update a specific source',
+        summary: 'Update a source config or credentials',
         tags: ['Sources'],
         parameters: [
           { $ref: '#/components/parameters/MerchantIdHeader' },
           { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } },
         ],
         requestBody: {
-          required: true,
           content: {
             'application/json': {
               schema: {
                 type: 'object',
                 properties: {
                   name: { type: 'string' },
-                  type: { type: 'string', enum: ['csv', 'xml', 'api'] },
-                  default_model_id: { type: 'string' },
+                  type: { type: 'string' },
                   connection_config: { type: 'object' },
                   schedule_cron: { type: 'string', nullable: true },
                   status: { type: 'string', enum: ['ACTIVE', 'PAUSED', 'ARCHIVED'] },
                 },
-                example: {
-                  name: 'Updated HVH Feed',
-                  type: 'xml',
-                  default_model_id: 'google/gemini-flash-1.5',
-                  connection_config: { url: 'https://example.com/feed.xml' },
-                  schedule_cron: '0 2 * * *',
-                  status: 'ACTIVE'
-                }
               },
             },
           },
         },
         responses: {
-          200: { description: 'Source updated successfully' },
+          200: { description: 'Updated source with masked credentials' },
           400: { description: 'Validation error' },
           404: { description: 'Source not found' },
         },
       },
       delete: {
-        summary: 'Delete a specific source',
+        summary: 'Soft-delete a source (ARCHIVED status)',
         tags: ['Sources'],
         parameters: [
           { $ref: '#/components/parameters/MerchantIdHeader' },
           { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } },
         ],
         responses: {
-          200: { description: 'Source deleted' },
+          200: { description: 'Source archived' },
+          404: { description: 'Source not found' },
         },
       },
     },
     '/sources/{id}/sync': {
       post: {
-        summary: 'Trigger manual source sync',
-        tags: ['Ingestion'],
+        summary: 'Trigger manual sync pipeline for a source',
+        tags: ['Sources'],
         parameters: [
           { $ref: '#/components/parameters/MerchantIdHeader' },
           { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } },
         ],
         responses: {
-          202: { description: 'Ingestion started in the background' },
-          409: { description: 'Sync already in progress' },
+          202: { description: 'Sync run initiated asynchronously' },
+          404: { description: 'Source not found' },
         },
       },
     },
     '/sources/{id}/runs': {
       get: {
-        summary: 'List all ingestion runs for a source',
-        tags: ['Ingestion'],
+        summary: 'Get ingestion run history for a source',
+        tags: ['Sources'],
         parameters: [
           { $ref: '#/components/parameters/MerchantIdHeader' },
           { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } },
         ],
         responses: {
-          200: { description: 'List of runs' },
+          200: { description: 'List of ingestion runs' },
+          404: { description: 'Source not found' },
         },
       },
     },
-    '/sources/runs/{runId}': {
+    '/health': {
       get: {
-        summary: 'Fetch specific run status',
-        tags: ['Ingestion'],
-        parameters: [
-          { $ref: '#/components/parameters/MerchantIdHeader' },
-          { in: 'path', name: 'runId', required: true, schema: { type: 'string', format: 'uuid' } },
-        ],
-        responses: {
-          200: { description: 'Run details' },
-        },
-      },
-    },
-    '/extract': {
-      post: {
-        summary: 'Test AI extraction (Mock)',
+        summary: 'Health check',
         tags: ['Utility & Testing'],
-        responses: { 200: { description: 'Mock extraction result' } }
+        responses: { 200: { description: 'OK' } }
       }
     },
     '/ingest-csv': {
       post: {
-        summary: 'Test CSV Parsing',
+        summary: 'Ingest local CSV file directly',
         tags: ['Utility & Testing'],
         requestBody: {
           content: {
-            'application/json': { schema: { type: 'object', properties: { filePath: { type: 'string' } } } }
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: { filePath: { type: 'string', default: 'mock_pushop.csv' } }
+              }
+            }
           }
         },
         responses: { 200: { description: 'CSV parsing summary' } }
@@ -286,8 +277,11 @@ export const swaggerDocument = {
                       required: ['name', 'data_type'],
                       properties: {
                         name: { type: 'string' },
-                        data_type: { type: 'string', enum: ['string', 'number', 'boolean', 'enum'] },
+                        key: { type: 'string' },
+                        data_type: { type: 'string', enum: ['string', 'integer', 'boolean', 'list_of_values'] },
                         is_required: { type: 'boolean', default: false },
+                        unit_type: { type: 'string', nullable: true },
+                        allowed_values: { type: 'array', items: { type: 'string' } },
                         list_of_values: { type: 'array', items: { type: 'string' } }
                       }
                     }
@@ -302,13 +296,19 @@ export const swaggerDocument = {
     },
     '/models/{id}': {
       get: {
-        summary: 'Get product model by ID',
+        summary: 'Get product model by ID (supports historical schema version query)',
         tags: ['Models'],
         parameters: [
           { $ref: '#/components/parameters/MerchantIdHeader' },
-          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Model UUID' },
+          { in: 'query', name: 'version', required: false, schema: { type: 'integer' }, description: 'Historical schema version to retrieve (defaults to latest active)' }
         ],
-        responses: { 200: { description: 'Product model details' }, 403: { description: 'Forbidden' }, 404: { description: 'Not found' } }
+        responses: {
+          200: { description: 'Product model details or historical version snapshot' },
+          400: { description: 'Invalid version query parameter' },
+          403: { description: 'Forbidden: Access to other merchant model rejected' },
+          404: { description: 'Model or schema version not found' }
+        }
       },
       put: {
         summary: 'Update an existing product model',
@@ -338,6 +338,112 @@ export const swaggerDocument = {
           { in: 'path', name: 'templateId', required: true, schema: { type: 'string', format: 'uuid' } }
         ],
         responses: { 201: { description: 'Cloned model' }, 403: { description: 'Forbidden' }, 404: { description: 'Not found' } }
+      }
+    },
+    '/models/{id}/attributes': {
+      get: {
+        summary: 'List attributes defined for a model',
+        tags: ['Model Attributes'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Model UUID' }
+        ],
+        responses: {
+          200: { description: 'List of model attributes' },
+          404: { description: 'Model not found' }
+        }
+      },
+      post: {
+        summary: 'Add an attribute to a model (increments schema_version and records snapshot)',
+        tags: ['Model Attributes'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Model UUID' }
+        ],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name', 'data_type'],
+                properties: {
+                  name: { type: 'string' },
+                  key: { type: 'string', pattern: '^[a-z0-9_]+$' },
+                  data_type: { type: 'string', enum: ['string', 'integer', 'boolean', 'list_of_values'] },
+                  is_required: { type: 'boolean', default: false },
+                  unit_type: { type: 'string', nullable: true },
+                  allowed_values: { type: 'array', items: { type: 'string' } }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          201: { description: 'Attribute added successfully' },
+          400: { description: 'Validation error (e.g. invalid key or missing allowed_values)' },
+          403: { description: 'Forbidden: Global template cannot be modified' },
+          404: { description: 'Model not found' }
+        }
+      }
+    },
+    '/models/{id}/attributes/{attributeId}': {
+      put: {
+        summary: 'Update an attribute definition on a model (increments schema_version and records snapshot)',
+        tags: ['Model Attributes'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Model UUID' },
+          { in: 'path', name: 'attributeId', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Attribute UUID' }
+        ],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  key: { type: 'string', pattern: '^[a-z0-9_]+$' },
+                  data_type: { type: 'string', enum: ['string', 'integer', 'boolean', 'list_of_values'] },
+                  is_required: { type: 'boolean' },
+                  unit_type: { type: 'string', nullable: true },
+                  allowed_values: { type: 'array', items: { type: 'string' } }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          200: { description: 'Attribute updated' },
+          400: { description: 'Validation error' },
+          404: { description: 'Attribute or model not found' }
+        }
+      },
+      delete: {
+        summary: 'Delete an attribute from a model (increments schema_version and records snapshot)',
+        tags: ['Model Attributes'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Model UUID' },
+          { in: 'path', name: 'attributeId', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Attribute UUID' }
+        ],
+        responses: {
+          200: { description: 'Attribute deleted successfully' },
+          404: { description: 'Attribute or model not found' }
+        }
+      }
+    },
+    '/models/{id}/versions': {
+      get: {
+        summary: 'List historical schema versions and immutable snapshots for a model',
+        tags: ['Models'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Model UUID' }
+        ],
+        responses: {
+          200: { description: 'List of historical versions and snapshots' },
+          404: { description: 'Model not found' }
+        }
       }
     }
   },
