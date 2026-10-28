@@ -649,5 +649,129 @@ describe('Milestone B2.1: Product Model Lifecycle & Template Cloning', () => {
       });
       assert.strictEqual(res.status, 403);
     });
+
+    it('Regression: should capture exact pre-mutation baseline for pre-versioned/seeded models without initial product_model_versions row', async () => {
+      // Seed a model and attributes directly into DB without an initial product_model_versions row
+      const seededModelRes = await pool.query(
+        `INSERT INTO product_models (merchant_id, name, description, status, schema_version, created_by, updated_by)
+         VALUES ($1, 'Pre-versioned Seeded Model', 'Seeded directly in DB without versions row', 'ACTIVE', 1, 'seeder', 'seeder')
+         RETURNING id`,
+        [merchantA]
+      );
+      const seededModelId = seededModelRes.rows[0].id;
+      createdModelIds.push(seededModelId);
+
+      const seededAttrRes = await pool.query(
+        `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
+         VALUES ($1, 'Initial Code', 'initial_code', 'string', false, NULL, '[]'::jsonb, '[]'::jsonb)
+         RETURNING id`,
+        [seededModelId]
+      );
+      const seededAttrId = seededAttrRes.rows[0].id;
+
+      // Verify no rows exist in product_model_versions
+      const preCheck = await pool.query(
+        'SELECT * FROM product_model_versions WHERE model_id = $1',
+        [seededModelId]
+      );
+      assert.strictEqual(preCheck.rows.length, 0);
+
+      // Perform an attribute update
+      const updateRes = await fetch(`${baseUrl}/${seededModelId}/attributes/${seededAttrId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          name: 'Modified Initial Code',
+          is_required: true
+        })
+      });
+      assert.strictEqual(updateRes.status, 200);
+
+      // Query version 1: must return EXACT pre-mutation state (Initial Code, is_required: false)
+      const v1Res = await fetch(`${baseUrl}/${seededModelId}?version=1`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(v1Res.status, 200);
+      const v1Data = await v1Res.json();
+      assert.strictEqual(v1Data.schema_version, 1);
+      assert.strictEqual(v1Data.attributes.length, 1);
+      assert.strictEqual(v1Data.attributes[0].name, 'Initial Code');
+      assert.strictEqual(v1Data.attributes[0].is_required, false);
+
+      // Query version 2: must return the updated state (Modified Initial Code, is_required: true)
+      const v2Res = await fetch(`${baseUrl}/${seededModelId}?version=2`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(v2Res.status, 200);
+      const v2Data = await v2Res.json();
+      assert.strictEqual(v2Data.schema_version, 2);
+      assert.strictEqual(v2Data.attributes.length, 1);
+      assert.strictEqual(v2Data.attributes[0].name, 'Modified Initial Code');
+      assert.strictEqual(v2Data.attributes[0].is_required, true);
+    });
+
+    it('Regression: updating an attribute on a legacy model with populated list_of_values and empty allowed_values preserves the array of strings', async () => {
+      // Seed a legacy model and attribute with populated list_of_values and empty allowed_values
+      const legacyModelRes = await pool.query(
+        `INSERT INTO product_models (merchant_id, name, description, status, schema_version, created_by, updated_by)
+         VALUES ($1, 'Legacy Attribute Model', 'Seeded legacy model with list_of_values', 'ACTIVE', 1, 'seeder', 'seeder')
+         RETURNING id`,
+        [merchantA]
+      );
+      const legacyModelId = legacyModelRes.rows[0].id;
+      createdModelIds.push(legacyModelId);
+
+      const legacyAttrRes = await pool.query(
+        `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
+         VALUES ($1, 'Size Options', 'size_options', 'list_of_values', false, NULL, '["S", "M", "L", "XL"]'::jsonb, '[]'::jsonb)
+         RETURNING id`,
+        [legacyModelId]
+      );
+      const legacyAttrId = legacyAttrRes.rows[0].id;
+
+      // Update the attribute without passing allowed_values (e.g. updating is_required)
+      const updateRes = await fetch(`${baseUrl}/${legacyModelId}/attributes/${legacyAttrId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          is_required: true
+        })
+      });
+      assert.strictEqual(updateRes.status, 200);
+      const updatedData = await updateRes.json();
+
+      // Ensure allowed_values and list_of_values preserved the array of strings and did not wipe it to []
+      assert.strictEqual(updatedData.is_required, true);
+      assert.deepStrictEqual(updatedData.allowed_values, ['S', 'M', 'L', 'XL']);
+      assert.deepStrictEqual(updatedData.list_of_values, ['S', 'M', 'L', 'XL']);
+
+      // Also verify via GET /api/models/:id that persisted attribute retained allowed_values
+      const getModelRes = await fetch(`${baseUrl}/${legacyModelId}`, {
+        headers: {
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        }
+      });
+      assert.strictEqual(getModelRes.status, 200);
+      const modelData = await getModelRes.json();
+      const attr = modelData.attributes.find((a) => a.id === legacyAttrId);
+      assert.ok(attr);
+      assert.deepStrictEqual(attr.allowed_values, ['S', 'M', 'L', 'XL']);
+      assert.deepStrictEqual(attr.list_of_values, ['S', 'M', 'L', 'XL']);
+    });
   });
 });

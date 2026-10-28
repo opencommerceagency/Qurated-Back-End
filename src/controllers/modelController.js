@@ -70,15 +70,13 @@ export async function verifyModelAccess(modelId, reqMerchantId, requireWriteAcce
   return model;
 }
 
-// Helper: increments parent model schema_version and records a complete snapshot in product_model_versions
-export async function recordVersionSnapshotOnAttributeChange(modelId, client = pool) {
-  // 1. Fetch current model state before incrementing
+// Helper: ensures the baseline snapshot for the current schema_version exists BEFORE any mutations are applied
+export async function ensureBaselineSnapshot(modelId, client = pool) {
   const curModelRes = await client.query('SELECT * FROM product_models WHERE id = $1', [modelId]);
   if (curModelRes.rows.length === 0) return null;
   const currentModel = curModelRes.rows[0];
   const currentVersion = currentModel.schema_version;
 
-  // 2. Ensure previous state snapshot exists for currentVersion
   const existingVer = await client.query(
     'SELECT id FROM product_model_versions WHERE model_id = $1 AND version = $2',
     [modelId, currentVersion]
@@ -96,7 +94,19 @@ export async function recordVersionSnapshotOnAttributeChange(modelId, client = p
       'INSERT INTO product_model_versions (model_id, version, snapshot) VALUES ($1, $2, $3)',
       [modelId, currentVersion, JSON.stringify(prevSnapshot)]
     );
+    return prevSnapshot;
   }
+  return null;
+}
+
+// Helper: increments parent model schema_version and records a complete snapshot in product_model_versions
+export async function recordVersionSnapshotOnAttributeChange(modelId, client = pool) {
+  // 1. Fetch current model state before incrementing
+  const curModelRes = await client.query('SELECT id FROM product_models WHERE id = $1', [modelId]);
+  if (curModelRes.rows.length === 0) return null;
+
+  // 2. Ensure baseline state snapshot exists for currentVersion (fallback if not already captured)
+  await ensureBaselineSnapshot(modelId, client);
 
   // 3. Increment schema_version on product_models
   const updateRes = await client.query(
@@ -237,6 +247,11 @@ export async function updateModel(req, res) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      if (attributes !== undefined) {
+        // Capture baseline BEFORE deleting old attributes or modifying schema!
+        await ensureBaselineSnapshot(id, client);
+      }
 
       const newName = name !== undefined ? name : existingModel.name;
       const newDesc = description !== undefined ? description : existingModel.description;
@@ -561,6 +576,9 @@ export async function addModelAttribute(req, res) {
 
     await client.query('BEGIN');
 
+    // Capture baseline snapshot before applying mutations
+    await ensureBaselineSnapshot(modelId, client);
+
     const result = await client.query(
       `INSERT INTO product_model_attributes (model_id, name, key, data_type, is_required, unit_type, list_of_values, allowed_values)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -645,7 +663,8 @@ export async function updateModelAttribute(req, res) {
 
     let finalAllowedValues = data.allowed_values ?? data.list_of_values;
     if (finalAllowedValues === undefined) {
-      finalAllowedValues = existingAttr.allowed_values ?? existingAttr.list_of_values ?? [];
+      const hasAllowed = Array.isArray(existingAttr.allowed_values) && existingAttr.allowed_values.length > 0;
+      finalAllowedValues = hasAllowed ? existingAttr.allowed_values : (existingAttr.list_of_values ?? []);
     }
 
     if (newDataType === 'list_of_values') {
@@ -659,6 +678,9 @@ export async function updateModelAttribute(req, res) {
     const valuesJson = JSON.stringify(finalAllowedValues);
 
     await client.query('BEGIN');
+
+    // Capture baseline snapshot before applying mutations
+    await ensureBaselineSnapshot(modelId, client);
 
     const updateRes = await client.query(
       `UPDATE product_model_attributes
@@ -726,6 +748,9 @@ export async function deleteModelAttribute(req, res) {
     }
 
     await client.query('BEGIN');
+
+    // Capture baseline snapshot before applying mutations
+    await ensureBaselineSnapshot(modelId, client);
 
     const deleteRes = await client.query(
       'DELETE FROM product_model_attributes WHERE id = $1 AND model_id = $2 RETURNING id',
@@ -813,6 +838,7 @@ export async function getModelVersions(req, res) {
 
 export default {
   verifyModelAccess,
+  ensureBaselineSnapshot,
   recordVersionSnapshotOnAttributeChange,
   createModel,
   updateModel,
