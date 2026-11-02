@@ -8,6 +8,7 @@ import { parseCsvFile } from './src/ingest-csv.js';
 import { pool } from './src/db/index.js';
 import sourceRoutes from './src/routes/sources.js';
 import modelRoutes from './src/routes/models.js';
+import extractionRoutes from './src/routes/extraction.js';
 import { startCronWorker } from './src/workers/cron.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerDocument } from './src/swagger.js';
@@ -41,6 +42,7 @@ app.use('/api', authenticateApi);
 // Routes
 app.use('/api/sources', sourceRoutes);
 app.use('/api/models', modelRoutes);
+app.use('/api/extraction', extractionRoutes);
 
 app.get('/health', (req, res) => {
     res.json({
