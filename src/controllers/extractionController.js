@@ -214,7 +214,93 @@ export async function getExtractionJobById(req, res) {
   }
 }
 
+/**
+ * PATCH /api/extraction/products/:id/state
+ * Updates or promotes a product's state with 409 conflict guard on active gaps.
+ */
+export async function updateProductState(req, res) {
+  try {
+    const merchantId = req.merchantId;
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    const { id } = req.params;
+    if (!id || !UUID_REGEX.test(id)) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const { state } = req.body;
+    if (!state) {
+      return res.status(400).json({ error: 'state field is required' });
+    }
+
+    // Verify tenant ownership of the extracted product
+    const checkRes = await pool.query(
+      'SELECT id, merchant_id FROM extracted_products WHERE id = $1',
+      [id]
+    );
+
+    if (checkRes.rows.length === 0 || checkRes.rows[0].merchant_id !== merchantId) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const { promoteProductState } = await import('../services/gapComputer.js');
+    const updated = await promoteProductState(id, state, pool);
+    return res.status(200).json(updated);
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({
+      error: error.error || error.message,
+      message: error.message
+    });
+  }
+}
+
+/**
+ * GET /api/extraction/products/:id/gaps
+ * Retrieves all gaps for an extracted product.
+ */
+export async function getProductGaps(req, res) {
+  try {
+    const merchantId = req.merchantId;
+    if (!merchantId) {
+      return res.status(400).json({ error: 'Invalid or missing x-merchant-id header. Must be a valid UUID.' });
+    }
+
+    const { id } = req.params;
+    if (!id || !UUID_REGEX.test(id)) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Verify tenant ownership
+    const checkRes = await pool.query(
+      'SELECT id, merchant_id FROM extracted_products WHERE id = $1',
+      [id]
+    );
+
+    if (checkRes.rows.length === 0 || checkRes.rows[0].merchant_id !== merchantId) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const gapsRes = await pool.query(
+      'SELECT * FROM product_gaps WHERE product_id = $1 ORDER BY created_at ASC',
+      [id]
+    );
+
+    return res.status(200).json({
+      product_id: id,
+      gaps: gapsRes.rows
+    });
+  } catch (error) {
+    const status = error.status || error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  }
+}
+
 export default {
   createExtractionJob,
-  getExtractionJobById
+  getExtractionJobById,
+  updateProductState,
+  getProductGaps
 };

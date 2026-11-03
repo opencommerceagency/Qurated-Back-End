@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { authenticateApi } from '../middleware/auth.js';
 import {
   createExtractionJob,
-  getExtractionJobById
+  getExtractionJobById,
+  updateProductState,
+  getProductGaps
 } from '../controllers/extractionController.js';
 
 const router = Router();
@@ -36,5 +38,9 @@ router.use((req, res, next) => {
 // Extraction job endpoints
 router.post('/jobs', createExtractionJob);
 router.get('/jobs/:id', getExtractionJobById);
+
+// Product state machine and gap endpoints
+router.patch('/products/:id/state', updateProductState);
+router.get('/products/:id/gaps', getProductGaps);
 
 export default router;

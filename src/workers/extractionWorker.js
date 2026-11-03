@@ -4,6 +4,8 @@ import { pool } from '../db/index.js';
 import { claimNextPendingJob } from '../services/queueService.js';
 import { compileModelZodSchema } from '../services/schemaCompiler.js';
 import { extractWithFallback } from '../services/aiClient.js';
+import { calculateConfidenceScore } from '../services/confidenceScorer.js';
+import { computeAndSyncProductGaps } from '../services/gapComputer.js';
 
 let workerIntervalId = null;
 
@@ -20,9 +22,11 @@ export function calculateBackoffMs(attempts) {
 }
 
 /**
- * Ingests an extracted product and its attributes idempotently into PostgreSQL:
+ * Ingests an extracted product and its attributes idempotently into PostgreSQL within an atomic transaction:
  * - UPSERT into extracted_products on (merchant_id, model_version_id, supplier_sku)
- * - UPSERT into extracted_attributes on (product_id, attribute_key)
+ * - UPSERT into extracted_attributes on (product_id, attribute_key) with provenance and confidence score
+ * - Deterministically evaluates gaps and syncs to product_gaps
+ * - Transitions product state to NEEDS_REVIEW or ENRICHED (or FAILED_EXTRACTION)
  *
  * @param {Object} params - Ingestion parameters
  * @param {string} params.merchant_id - Tenant merchant UUID
@@ -32,8 +36,14 @@ export function calculateBackoffMs(attempts) {
  * @param {string} [params.source_file_id] - Optional source file UUID
  * @param {number} [params.source_row_index] - Row or item index
  * @param {string} [params.source_column] - Source column name if known
- * @param {number} [params.confidence_score=100] - Confidence score (0-100)
+ * @param {number} [params.page_number] - Lineage page number
+ * @param {Object} [params.bounding_box] - Bounding box { x, y, w, h }
+ * @param {number} [params.confidence_score] - Confidence score override (0-100)
  * @param {string} [params.raw_source_value] - Raw unnormalized source value
+ * @param {Object} [params.attribute_provenance] - Map of per-attribute provenance overrides
+ * @param {boolean} [params.computeGaps=false] - Whether to trigger gap evaluation & state transition
+ * @param {number} [params.min_confidence_threshold=75] - Minimum confidence threshold for gaps
+ * @param {Object|Array} [params.schemaSnapshot] - Active model version snapshot
  * @param {Object} [client=pool] - Active database client or pool
  * @returns {Promise<Object>} Inserted/updated product record and metadata
  */
@@ -46,8 +56,14 @@ export async function ingestExtractedProduct(
     source_file_id = null,
     source_row_index = null,
     source_column = null,
-    confidence_score = 100,
-    raw_source_value = null
+    page_number = null,
+    bounding_box = null,
+    confidence_score = null,
+    raw_source_value = null,
+    attribute_provenance = {},
+    computeGaps = false,
+    min_confidence_threshold = 75,
+    schemaSnapshot = null
   },
   client = pool
 ) {
@@ -56,69 +72,195 @@ export async function ingestExtractedProduct(
     throw new Error('supplier_sku is required for product ingestion');
   }
 
-  // 1. UPSERT extracted_products
-  const productRes = await client.query(
-    `INSERT INTO extracted_products (
-       merchant_id, job_id, model_version_id, supplier_sku, state, updated_at
-     )
-     VALUES ($1, $2, $3, $4, 'PROCESSING', NOW())
-     ON CONFLICT (merchant_id, model_version_id, supplier_sku)
-     DO UPDATE SET
-       job_id = EXCLUDED.job_id,
-       state = 'PROCESSING',
-       updated_at = NOW()
-     RETURNING id, merchant_id, job_id, model_version_id, supplier_sku, state, created_at, updated_at`,
-    [merchant_id, job_id, model_version_id, String(supplierSku).trim()]
-  );
+  const isDedicatedClient = client !== pool;
+  const dbClient = isDedicatedClient ? client : await pool.connect();
+  const shouldManageTransaction = !isDedicatedClient;
 
-  const product = productRes.rows[0];
-  const productId = product.id;
-
-  // 2. UPSERT extracted_attributes
-  const attributeKeys = Object.keys(productData).filter(
-    (k) => k !== 'supplier_sku' && k !== 'sku' && productData[k] !== undefined
-  );
-
-  for (const attrKey of attributeKeys) {
-    const attrVal = productData[attrKey];
-    const jsonVal = JSON.stringify(attrVal);
-    const rawVal =
-      raw_source_value !== null
-        ? raw_source_value
-        : typeof attrVal === 'object'
-          ? JSON.stringify(attrVal)
-          : String(attrVal ?? '');
-
-    await client.query(
-      `INSERT INTO extracted_attributes (
-         product_id, attribute_key, value, confidence_score,
-         source_file_id, source_row_index, source_column, raw_source_value, updated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-       ON CONFLICT (product_id, attribute_key)
-       DO UPDATE SET
-         value = EXCLUDED.value,
-         confidence_score = EXCLUDED.confidence_score,
-         raw_source_value = EXCLUDED.raw_source_value,
-         updated_at = NOW()`,
-      [
-        productId,
-        attrKey,
-        jsonVal,
-        confidence_score,
-        source_file_id,
-        source_row_index,
-        source_column,
-        rawVal
-      ]
-    );
+  if (shouldManageTransaction) {
+    await dbClient.query('BEGIN');
   }
 
-  return {
-    productId,
-    product,
-    attributeCount: attributeKeys.length
-  };
+  try {
+    // 1. UPSERT extracted_products - resetting state to PROCESSING if re-extracting
+    const productRes = await dbClient.query(
+      `INSERT INTO extracted_products (
+         merchant_id, job_id, model_version_id, supplier_sku, state, updated_at
+       )
+       VALUES ($1, $2, $3, $4, 'PROCESSING', NOW())
+       ON CONFLICT (merchant_id, model_version_id, supplier_sku)
+       DO UPDATE SET
+         job_id = EXCLUDED.job_id,
+         state = 'PROCESSING',
+         updated_at = NOW()
+       RETURNING id, merchant_id, job_id, model_version_id, supplier_sku, state, created_at, updated_at`,
+      [merchant_id, job_id, model_version_id, String(supplierSku).trim()]
+    );
+
+    const product = productRes.rows[0];
+    const productId = product.id;
+
+    // Resolve snapshot attribute definitions if available
+    let snapshotAttributes = [];
+    if (schemaSnapshot) {
+      snapshotAttributes = Array.isArray(schemaSnapshot)
+        ? schemaSnapshot
+        : Array.isArray(schemaSnapshot?.attributes)
+          ? schemaSnapshot.attributes
+          : [];
+    }
+
+    // 2. UPSERT extracted_attributes
+    const nonAttrKeys = new Set([
+      'supplier_sku',
+      'sku',
+      'page_number',
+      'bounding_box',
+      'raw_source_value',
+      'confidence_score',
+      'attribute_provenance'
+    ]);
+
+    const attributeKeys = Object.keys(productData).filter(
+      (k) => !nonAttrKeys.has(k) && productData[k] !== undefined
+    );
+
+    for (const attrKey of attributeKeys) {
+      const attrVal = productData[attrKey];
+      let actualVal = attrVal;
+      let attrConfidence = confidence_score;
+      let attrPageNumber = page_number;
+      let attrBoundingBox = bounding_box;
+      let attrRawSource = raw_source_value;
+
+      // Extract lineage if attribute value itself is an object with metadata
+      if (
+        attrVal !== null &&
+        typeof attrVal === 'object' &&
+        !Array.isArray(attrVal) &&
+        ('value' in attrVal || 'raw_source_value' in attrVal || 'bounding_box' in attrVal)
+      ) {
+        actualVal = attrVal.value !== undefined ? attrVal.value : null;
+        if (attrVal.confidence_score !== undefined) attrConfidence = attrVal.confidence_score;
+        if (attrVal.page_number !== undefined) attrPageNumber = attrVal.page_number;
+        if (attrVal.bounding_box !== undefined) attrBoundingBox = attrVal.bounding_box;
+        if (attrVal.raw_source_value !== undefined) attrRawSource = attrVal.raw_source_value;
+      }
+
+      // Check per-attribute explicit provenance dictionary
+      const prov = attribute_provenance[attrKey];
+      if (prov) {
+        if (prov.confidence_score !== undefined) attrConfidence = prov.confidence_score;
+        if (prov.page_number !== undefined) attrPageNumber = prov.page_number;
+        if (prov.bounding_box !== undefined) attrBoundingBox = prov.bounding_box;
+        if (prov.raw_source_value !== undefined) attrRawSource = prov.raw_source_value;
+      }
+
+      // Find schema definition for unit/type
+      const attrDef = snapshotAttributes.find(
+        (a) => (a.key || a.name) === attrKey
+      );
+      const attrType = attrDef?.data_type || null;
+      const attrUnit = attrDef?.unit_type || null;
+
+      // Calculate confidence score if raw_source_value is provided or not explicitly fixed
+      if (attrConfidence === null || attrConfidence === undefined || attrRawSource !== null) {
+        const calculated = calculateConfidenceScore({
+          extractedValue: actualVal,
+          rawSourceValue: attrRawSource,
+          attributeType: attrType,
+          unit: attrUnit
+        });
+
+        if (attrConfidence === null || attrConfidence === undefined) {
+          attrConfidence = calculated;
+        } else if (
+          attrRawSource !== null &&
+          prov?.confidence_score === undefined &&
+          (typeof attrVal !== 'object' || attrVal?.confidence_score === undefined)
+        ) {
+          attrConfidence = calculated;
+        }
+      }
+
+      const jsonVal = JSON.stringify(actualVal);
+      const jsonBoundingBox = attrBoundingBox
+        ? typeof attrBoundingBox === 'object'
+          ? JSON.stringify(attrBoundingBox)
+          : attrBoundingBox
+        : null;
+
+      await dbClient.query(
+        `INSERT INTO extracted_attributes (
+           product_id, attribute_key, value, confidence_score,
+           source_file_id, source_row_index, source_column,
+           page_number, bounding_box, raw_source_value, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+         ON CONFLICT (product_id, attribute_key)
+         DO UPDATE SET
+           value = EXCLUDED.value,
+           confidence_score = EXCLUDED.confidence_score,
+           page_number = EXCLUDED.page_number,
+           bounding_box = EXCLUDED.bounding_box,
+           raw_source_value = EXCLUDED.raw_source_value,
+           updated_at = NOW()`,
+        [
+          productId,
+          attrKey,
+          jsonVal,
+          attrConfidence ?? 100,
+          source_file_id,
+          source_row_index,
+          source_column,
+          attrPageNumber,
+          jsonBoundingBox,
+          attrRawSource
+        ]
+      );
+    }
+
+    // 3. Gap Computation & State Transition
+    let finalProduct = product;
+    let gaps = [];
+    let state = product.state;
+
+    const shouldComputeGaps = Boolean(computeGaps || schemaSnapshot);
+    if (shouldComputeGaps) {
+      const gapResult = await computeAndSyncProductGaps(
+        {
+          productId,
+          modelVersionId: model_version_id,
+          schemaSnapshot,
+          minConfidenceThreshold: min_confidence_threshold
+        },
+        dbClient
+      );
+      finalProduct = gapResult.product;
+      gaps = gapResult.gaps;
+      state = gapResult.state;
+    }
+
+    if (shouldManageTransaction) {
+      await dbClient.query('COMMIT');
+    }
+
+    return {
+      productId,
+      product: finalProduct,
+      state,
+      gaps,
+      attributeCount: attributeKeys.length
+    };
+  } catch (err) {
+    if (shouldManageTransaction) {
+      await dbClient.query('ROLLBACK').catch(() => {});
+    }
+    throw err;
+  } finally {
+    if (shouldManageTransaction) {
+      dbClient.release();
+    }
+  }
 }
 
 /**
@@ -278,14 +420,23 @@ export async function processJob(jobId, options = {}, client = pool) {
                   ? JSON.stringify(rawItem)
                   : String(rawItem);
           } else if (compiledSchema && typeof processedData === 'object' && (processedData.supplier_sku || processedData.sku)) {
-            // Validate against compiled Zod schema
-            const parseResult = compiledSchema.safeParse(processedData);
-            if (!parseResult.success) {
-              itemValid = false;
-              errorMessage = parseResult.error.issues[0]?.message || 'Schema validation failed';
-              rawValue = JSON.stringify(processedData);
+            if (options.strictSchemaValidation) {
+              const parseResult = compiledSchema.safeParse(processedData);
+              if (!parseResult.success) {
+                itemValid = false;
+                errorMessage = parseResult.error.issues[0]?.message || 'Schema validation failed';
+                rawValue = JSON.stringify(processedData);
+              } else {
+                processedData = parseResult.data;
+              }
             } else {
-              processedData = parseResult.data;
+              // Ensure valid supplier_sku, while attribute schema violations are evaluated as product gaps in gapComputer
+              const rawSku = processedData.supplier_sku || processedData.sku;
+              if (!rawSku || String(rawSku).trim() === '') {
+                itemValid = false;
+                errorMessage = 'supplier_sku is required';
+                rawValue = JSON.stringify(processedData);
+              }
             }
           }
 
@@ -306,6 +457,12 @@ export async function processJob(jobId, options = {}, client = pool) {
                   productData: processedData,
                   source_file_id: job.file_id,
                   source_row_index: itemIndex,
+                  page_number: processedData.page_number ?? rawItem?.page_number ?? null,
+                  bounding_box: processedData.bounding_box ?? rawItem?.bounding_box ?? null,
+                  raw_source_value: processedData.raw_source_value ?? rawItem?.raw_source_value ?? null,
+                  confidence_score: processedData.confidence_score,
+                  computeGaps: true,
+                  schemaSnapshot,
                   client
                 },
                 client
@@ -320,6 +477,29 @@ export async function processJob(jobId, options = {}, client = pool) {
               error: errorMessage,
               raw_value: rawValue
             });
+
+            // If product has a SKU but extraction/validation failed, record as FAILED_EXTRACTION
+            if (
+              processedData &&
+              typeof processedData === 'object' &&
+              (processedData.supplier_sku || processedData.sku) &&
+              job.merchant_id &&
+              job.model_version_id
+            ) {
+              const sku = processedData.supplier_sku || processedData.sku;
+              await client.query(
+                `INSERT INTO extracted_products (
+                   merchant_id, job_id, model_version_id, supplier_sku, state, updated_at
+                 )
+                 VALUES ($1, $2, $3, $4, 'FAILED_EXTRACTION', NOW())
+                 ON CONFLICT (merchant_id, model_version_id, supplier_sku)
+                 DO UPDATE SET
+                   job_id = EXCLUDED.job_id,
+                   state = 'FAILED_EXTRACTION',
+                   updated_at = NOW()`,
+                [job.merchant_id, jobId, job.model_version_id, String(sku).trim()]
+              );
+            }
           }
         } catch (itemErr) {
           failedRecords++;
