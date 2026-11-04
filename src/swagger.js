@@ -445,6 +445,148 @@ export const swaggerDocument = {
           404: { description: 'Model not found' }
         }
       }
+    },
+    '/products': {
+      get: {
+        summary: 'Query the paginated review queue of extracted products',
+        tags: ['Products'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'query', name: 'state', schema: { type: 'string', enum: ['PROCESSING', 'NEEDS_REVIEW', 'ENRICHED', 'FAILED_EXTRACTION'] }, description: 'Filter by product state' },
+          { in: 'query', name: 'job_id', schema: { type: 'string', format: 'uuid' }, description: 'Filter by extraction job UUID' },
+          { in: 'query', name: 'page', schema: { type: 'integer', default: 1 }, description: 'Page number' },
+          { in: 'query', name: 'limit', schema: { type: 'integer', default: 20 }, description: 'Items per page (max 100)' }
+        ],
+        responses: {
+          200: {
+            description: 'Paginated product review queue with active gaps',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string', format: 'uuid' },
+                          merchant_id: { type: 'string', format: 'uuid' },
+                          job_id: { type: 'string', format: 'uuid' },
+                          model_version_id: { type: 'string', format: 'uuid' },
+                          supplier_sku: { type: 'string' },
+                          state: { type: 'string', enum: ['PROCESSING', 'NEEDS_REVIEW', 'ENRICHED', 'FAILED_EXTRACTION'] },
+                          gaps: { type: 'array', items: { type: 'object' } },
+                          created_at: { type: 'string', format: 'date-time' },
+                          updated_at: { type: 'string', format: 'date-time' }
+                        }
+                      }
+                    },
+                    pagination: {
+                      type: 'object',
+                      properties: {
+                        page: { type: 'integer' },
+                        limit: { type: 'integer' },
+                        total: { type: 'integer' },
+                        totalPages: { type: 'integer' }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          400: { description: 'Invalid query parameters' }
+        }
+      }
+    },
+    '/products/{id}': {
+      get: {
+        summary: 'Retrieve single product detail with gaps and extracted attributes',
+        tags: ['Products'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Product UUID' }
+        ],
+        responses: {
+          200: {
+            description: 'Product detail with active gaps and extracted attributes',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    merchant_id: { type: 'string', format: 'uuid' },
+                    job_id: { type: 'string', format: 'uuid' },
+                    model_version_id: { type: 'string', format: 'uuid' },
+                    supplier_sku: { type: 'string' },
+                    state: { type: 'string' },
+                    gaps: { type: 'array', items: { type: 'object' } },
+                    attributes: { type: 'array', items: { type: 'object' } },
+                    created_at: { type: 'string', format: 'date-time' },
+                    updated_at: { type: 'string', format: 'date-time' }
+                  }
+                }
+              }
+            }
+          },
+          404: { description: 'Product not found' }
+        }
+      }
+    },
+    '/products/{id}/attributes': {
+      put: {
+        summary: 'Manually override product attributes, clear resolved gaps, and evaluate promotion',
+        tags: ['Products'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, description: 'Product UUID' },
+          { in: 'header', name: 'x-user-id', required: false, schema: { type: 'string' }, description: 'Operator user identifier' }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['attributes'],
+                properties: {
+                  attributes: {
+                    type: 'object',
+                    description: 'Key-value map of attributes to override',
+                    example: {
+                      weight: 1250,
+                      color: 'matte black'
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Attributes successfully updated and gaps re-evaluated',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    product_id: { type: 'string', format: 'uuid' },
+                    state: { type: 'string', enum: ['NEEDS_REVIEW', 'ENRICHED'] },
+                    remaining_gaps_count: { type: 'integer' },
+                    message: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          400: { description: 'Schema validation error (SCHEMA_VALIDATION_ERROR)' },
+          404: { description: 'Product not found' },
+          409: { description: 'Conflict on illegal promotion' }
+        }
+      }
     }
   },
 };

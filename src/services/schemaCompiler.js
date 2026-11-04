@@ -151,8 +151,94 @@ export function generatePromptSchemaDescription(snapshot) {
   return fields.join('\n');
 }
 
+/**
+ * Compiles a Zod schema for validating a partial set of attributes being manually overridden.
+ *
+ * @param {Object|Array} snapshot - Model snapshot
+ * @param {string[]} attributeKeys - Keys of the attributes being overridden
+ * @returns {z.ZodObject} Compiled Zod schema for the attributes
+ */
+export function compileAttributesOverrideSchema(snapshot, attributeKeys = []) {
+  const attributes = Array.isArray(snapshot)
+    ? snapshot
+    : Array.isArray(snapshot?.attributes)
+      ? snapshot.attributes
+      : [];
+
+  const shape = {};
+  for (const key of attributeKeys) {
+    const attr = attributes.find(
+      (a) => (a.key || (a.name ? a.name.toLowerCase().replace(/[^a-z0-9_]/g, '_') : null)) === key
+    );
+
+    if (!attr) {
+      shape[key] = z.any().refine(() => false, {
+        message: `Attribute "${key}" is not defined in model schema`
+      });
+      continue;
+    }
+
+    const dataType = (attr.data_type || attr.dataType || 'string').toLowerCase();
+
+    switch (dataType) {
+      case 'integer':
+      case 'number':
+        shape[key] = z.preprocess((val) => {
+          if (typeof val === 'boolean') return NaN;
+          if (typeof val === 'string') {
+            if (!/^-?\d+$/.test(val.trim())) return NaN;
+            return parseInt(val.trim(), 10);
+          }
+          return val;
+        }, z.number({ message: `Field "${key}" must be an integer` }).int({ message: `Field "${key}" must be an integer` }));
+        break;
+
+      case 'boolean':
+        shape[key] = safeBooleanCoerce;
+        break;
+
+      case 'list_of_values':
+      case 'enum': {
+        let allowed = attr.allowed_values || attr.list_of_values || [];
+        if (typeof allowed === 'string') {
+          try {
+            allowed = JSON.parse(allowed);
+          } catch {
+            allowed = [];
+          }
+        }
+        const validList = Array.isArray(allowed)
+          ? allowed.map((item) => String(item).trim()).filter(Boolean)
+          : [];
+
+        if (validList.length > 0) {
+          shape[key] = z.enum(validList, {
+            errorMap: () => ({
+              message: `Value is not permitted for "${key}". Allowed values: [${validList.join(', ')}]`
+            })
+          });
+        } else {
+          shape[key] = z.coerce.string();
+        }
+        break;
+      }
+
+      case 'string':
+      default:
+        shape[key] = z.preprocess(
+          (val) => (typeof val === 'string' ? val.trim() : val),
+          z.string({ message: `Field "${key}" must be a string` }).min(1, { message: `Field "${key}" cannot be empty` })
+        );
+        break;
+    }
+  }
+
+  return z.object(shape);
+}
+
 export default {
   compileAttributeFieldSchema,
   compileModelZodSchema,
-  generatePromptSchemaDescription
+  generatePromptSchemaDescription,
+  compileAttributesOverrideSchema
 };
