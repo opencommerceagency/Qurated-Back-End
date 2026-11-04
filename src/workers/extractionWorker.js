@@ -2,6 +2,7 @@ import fs from 'fs';
 import { parse } from 'csv-parse/sync';
 import { pool } from '../db/index.js';
 import { claimNextPendingJob } from '../services/queueService.js';
+import { getSanitizedPath } from '../services/fileValidator.js';
 
 let workerIntervalId = null;
 
@@ -78,16 +79,19 @@ export async function processJob(jobId, options = {}, client = pool) {
       const fileRes = await client.query('SELECT * FROM files WHERE id = $1', [job.file_id]);
       if (fileRes.rows.length > 0) {
         const fileRecord = fileRes.rows[0];
-        if (fileRecord.file_path && fs.existsSync(fileRecord.file_path)) {
-          const content = fs.readFileSync(fileRecord.file_path, 'utf-8');
-          try {
-            items = parse(content, {
-              columns: true,
-              skip_empty_lines: true,
-              trim: true
-            });
-          } catch {
-            items = [];
+        if (fileRecord.file_path) {
+          const safePath = getSanitizedPath(fileRecord.file_path);
+          if (fs.existsSync(safePath)) {
+            const content = fs.readFileSync(safePath, 'utf-8');
+            try {
+              items = parse(content, {
+                columns: true,
+                skip_empty_lines: true,
+                trim: true
+              });
+            } catch {
+              items = [];
+            }
           }
         }
       }
