@@ -4,6 +4,7 @@ import { pool } from '../db/index.js';
 import { claimNextPendingJob } from '../services/queueService.js';
 import { compileModelZodSchema } from '../services/schemaCompiler.js';
 import { extractWithFallback } from '../services/aiClient.js';
+import { getSanitizedPath } from '../services/fileValidator.js';
 
 let workerIntervalId = null;
 
@@ -201,16 +202,19 @@ export async function processJob(jobId, options = {}, client = pool) {
         if (fileRecord.filename?.toLowerCase().endsWith('.pdf')) {
           fileType = 'pdf';
         }
-        if (fileRecord.file_path && fs.existsSync(fileRecord.file_path)) {
-          const content = fs.readFileSync(fileRecord.file_path, 'utf-8');
-          try {
-            items = parse(content, {
-              columns: true,
-              skip_empty_lines: true,
-              trim: true
-            });
-          } catch {
-            items = [];
+        if (fileRecord.file_path) {
+          const safePath = getSanitizedPath(fileRecord.file_path);
+          if (fs.existsSync(safePath)) {
+            const content = fs.readFileSync(safePath, 'utf-8');
+            try {
+              items = parse(content, {
+                columns: true,
+                skip_empty_lines: true,
+                trim: true
+              });
+            } catch {
+              items = [];
+            }
           }
         }
       }
@@ -429,7 +433,7 @@ export async function processNextJob(options = {}) {
 
     return await processJob(claimedJob.id, options);
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     throw err;
   } finally {
     client.release();
