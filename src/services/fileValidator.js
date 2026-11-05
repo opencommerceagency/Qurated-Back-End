@@ -1,8 +1,31 @@
 import fs from 'fs';
+import path from 'path';
 import zlib from 'zlib';
 
 export const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
 export const MAX_PDF_PAGES = 50;
+export const SAFE_BASE_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads'));
+
+/**
+ * Sanitizes and validates an unsafe path against path traversal / LFI.
+ * Ensures that the resolved path stays strictly within SAFE_BASE_DIR.
+ *
+ * @param {string} unsafePath - The raw, potentially untrusted file path
+ * @returns {string} Fully resolved and jailed absolute path
+ */
+export function getSanitizedPath(unsafePath) {
+  if (typeof unsafePath !== 'string') {
+    throw new Error('Invalid path format');
+  }
+  if (unsafePath.indexOf('\0') !== -1) {
+    throw new Error('Invalid path format');
+  }
+  const targetPath = path.resolve(SAFE_BASE_DIR, unsafePath);
+  if (!targetPath.startsWith(SAFE_BASE_DIR + path.sep)) {
+    throw new Error('Path traversal detected: Access denied');
+  }
+  return targetPath;
+}
 
 /**
  * Extracts raw or decompressed stream bytes from a PDF buffer.
@@ -161,17 +184,18 @@ export function validateFile(input) {
 
   if (typeof input === 'string') {
     // File path
-    if (!fs.existsSync(input)) {
+    const safeInputPath = getSanitizedPath(input);
+    if (!fs.existsSync(safeInputPath)) {
       return {
         valid: false,
         error: 'FILE_NOT_FOUND',
         message: `File not found at path: ${input}`
       };
     }
-    const stat = fs.statSync(input);
+    const stat = fs.statSync(safeInputPath);
     fileSize = stat.size;
     filename = input;
-    buffer = fs.readFileSync(input);
+    buffer = fs.readFileSync(safeInputPath);
   } else if (Buffer.isBuffer(input)) {
     buffer = input;
     fileSize = input.length;
@@ -179,11 +203,14 @@ export function validateFile(input) {
     if (input.buffer && Buffer.isBuffer(input.buffer)) {
       buffer = input.buffer;
       fileSize = input.size || input.buffer.length;
-    } else if (input.filePath && fs.existsSync(input.filePath)) {
-      const stat = fs.statSync(input.filePath);
-      fileSize = input.size || stat.size;
-      filename = input.filename || input.filePath;
-      buffer = fs.readFileSync(input.filePath);
+    } else if (input.filePath) {
+      const safePath = getSanitizedPath(input.filePath);
+      if (fs.existsSync(safePath)) {
+        const stat = fs.statSync(safePath);
+        fileSize = input.size || stat.size;
+        filename = input.filename || input.filePath;
+        buffer = fs.readFileSync(safePath);
+      }
     } else if (typeof input.content === 'string') {
       buffer = Buffer.from(input.content, 'utf-8');
       fileSize = input.size || buffer.length;
@@ -323,5 +350,7 @@ export function validateFile(input) {
 export default {
   MAX_FILE_SIZE,
   MAX_PDF_PAGES,
+  SAFE_BASE_DIR,
+  getSanitizedPath,
   validateFile
 };

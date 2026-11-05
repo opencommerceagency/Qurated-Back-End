@@ -3,7 +3,8 @@ import assert from 'node:assert';
 import express from 'express';
 import { pool } from '../src/db/index.js';
 import extractionRouter from '../src/routes/extraction.js';
-import { validateFile, MAX_FILE_SIZE, MAX_PDF_PAGES } from '../src/services/fileValidator.js';
+import { validateFile, MAX_FILE_SIZE, MAX_PDF_PAGES, getSanitizedPath, SAFE_BASE_DIR } from '../src/services/fileValidator.js';
+import { getSanitizedPath as getSanitizedPathUtil } from '../src/utils/fileValidator.js';
 import { enqueueJob } from '../src/services/queueService.js';
 import { processJob, calculateBackoffMs } from '../src/workers/extractionWorker.js';
 
@@ -270,6 +271,63 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       });
       assert.strictEqual(validCsv.valid, true);
       assert.deepStrictEqual(validCsv.headers, ['sku', 'name', 'price']);
+    });
+
+    it('Security / LFI remediation: Reject path traversal and null-byte injection attempts', async () => {
+      // 1. Direct getSanitizedPath tests
+      assert.throws(
+        () => getSanitizedPath('../../../../secret.txt'),
+        /Path traversal detected: Access denied/
+      );
+      assert.throws(
+        () => getSanitizedPathUtil('../../../../secret.txt'),
+        /Path traversal detected: Access denied/
+      );
+      assert.throws(
+        () => getSanitizedPath('malicious\0file.pdf'),
+        /Invalid path format/
+      );
+      assert.throws(
+        () => getSanitizedPath(12345),
+        /Invalid path format/
+      );
+
+      // Verify safe resolution within SAFE_BASE_DIR
+      const resolved = getSanitizedPath('safe_file.csv');
+      assert.ok(resolved.startsWith(SAFE_BASE_DIR));
+
+      // 2. Direct validateFile tests
+      assert.throws(
+        () => validateFile('../../../../etc/passwd'),
+        /Path traversal detected: Access denied/
+      );
+      assert.throws(
+        () => validateFile({ filePath: '../../../../secret.txt' }),
+        /Path traversal detected: Access denied/
+      );
+      assert.throws(
+        () => validateFile({ filePath: 'bad\0file.pdf' }),
+        /Invalid path format/
+      );
+
+      // 3. HTTP endpoint check: should reject path traversal in file_path with 400 Bad Request
+      const res = await fetch(`${baseUrl}/jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          file_id: validFileAId,
+          model_version_id: modelVersionAId,
+          file_path: '../../../../secret.txt'
+        })
+      });
+
+      assert.strictEqual(res.status, 400);
+      const data = await res.json();
+      assert.ok(data.error.includes('Path traversal detected') || data.error.includes('Access denied'));
     });
 
     it('Valid file: Enqueue job and return 202 Accepted with job_id and initial status PENDING', async () => {
