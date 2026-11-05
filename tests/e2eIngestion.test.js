@@ -1,11 +1,11 @@
-// this is what sander asked: full e2e test from api to database
+// End-to-end ingestion test from API to database.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import express from 'express';
 import { pool } from '../src/db/index.js';
 import sourceRouter from '../src/routes/sources.js';
 
-// this will make sure its safe: ensuring test environment has valid dummy credentials
+// Ensure test environment has valid dummy credentials.
 process.env.API_KEY = process.env.API_KEY || 'qurated_dev_api_key_2026';
 process.env.API_AUTH_USER = process.env.API_AUTH_USER || 'admin';
 process.env.API_AUTH_PASS = process.env.API_AUTH_PASS || 'qurated_dev_password';
@@ -19,7 +19,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
   let createdSourceId;
   let originalFetch;
 
-  // setting up our test express server and mock remote supplier stream
+  // Spin up an in-memory Express server and mock the remote supplier stream.
   before(async () => {
     app = express();
     app.use(express.json());
@@ -33,7 +33,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
       });
     });
 
-    // this is the fetch: downloading the remote supplier stream via mock
+    // Mock the remote supplier CSV download stream.
     originalFetch = globalThis.fetch;
     const csvContent = [
       'sku,name,price,ean,weight',
@@ -47,7 +47,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
     ].join('\n');
 
     globalThis.fetch = async (url, options) => {
-      // if url is our local test express server, use original fetch
+      // Forward requests aimed at the local test Express server to the original fetch.
       if (typeof url === 'string' && (url.includes('127.0.0.1') || url.includes('localhost'))) {
         return originalFetch(url, options);
       }
@@ -69,7 +69,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
     };
   });
 
-  // cleaning up database records, closing server and db pool
+  // Clean up database records and close active resources.
   after(async () => {
     globalThis.fetch = originalFetch;
 
@@ -83,7 +83,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
 
   it('should run full lifecycle: create source, trigger sync, normalize clean records, triage dirty records', async () => {
     // 1. Create source via API
-    // this is what sander asked: keeping format and protocol strictly separate
+    // Keep file format and transport protocol strictly decoupled.
     const createPayload = {
       name: 'E2E Hardware Supplier Catalog',
       type: 'csv',
@@ -146,7 +146,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
     assert.strictEqual(run.total_rows, run.valid_rows + run.failed_rows);
 
     // 4. Assert valid normalized records
-    // checking that valid rows land in normalized table
+    // Verify valid rows land in the normalized table.
     const normalizedRes = await pool.query(
       'SELECT * FROM normalized_records WHERE run_id = $1 ORDER BY sku ASC',
       [runId]
@@ -168,7 +168,7 @@ describe('End-to-End Ingestion Pipeline (Milestone B1 Full Lifecycle)', () => {
     assert.strictEqual(bolt.unit_type, 'kg');
 
     // 5. Assert flagged dirty records
-    // checking that dirty rows land in flagged table with specific error reasons
+    // Verify dirty rows land in the flagged table with explicit error reasons.
     const flaggedRes = await pool.query(
       'SELECT * FROM flagged_records WHERE run_id = $1 ORDER BY row_index ASC',
       [runId]
