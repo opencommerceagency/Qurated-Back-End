@@ -2,7 +2,7 @@ import fs from 'fs';
 import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { enqueueJob, getJobById } from '../services/queueService.js';
-import { validateFile } from '../services/fileValidator.js';
+import { validateFile, getSanitizedPath } from '../services/fileValidator.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -74,13 +74,16 @@ async function resolveAndVerifyFile(fileId, merchantId, reqBody = {}, client = p
     reqBody.text_content !== undefined
   ) {
     let size = reqBody.file_size || 0;
-    if (!size && reqBody.file_path && fs.existsSync(reqBody.file_path)) {
-      size = fs.statSync(reqBody.file_path).size;
+    if (!size && reqBody.file_path) {
+      const safePath = getSanitizedPath(reqBody.file_path);
+      if (fs.existsSync(safePath)) {
+        size = fs.statSync(safePath).size;
+      }
     } else if (!size && reqBody.file_content) {
       size = Buffer.byteLength(reqBody.file_content, 'utf-8');
     }
 
-    const insertRes = await client.query(
+    const insertRes = await pool.query(
       `INSERT INTO files (id, merchant_id, filename, file_path, file_size, mime_type, metadata, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
        RETURNING *`,
@@ -136,7 +139,7 @@ export async function createExtractionJob(req, res) {
 
     // 3. Run fileValidator guardrails synchronously
     const fileToValidate = {
-      filePath: fileRecord.file_path,
+      filePath: req.body.file_path || fileRecord.file_path,
       size: req.body.file_size !== undefined ? Number(req.body.file_size) : Number(fileRecord.file_size),
       filename: req.body.filename || fileRecord.filename,
       mimeType: req.body.mime_type || fileRecord.mime_type,
@@ -171,6 +174,9 @@ export async function createExtractionJob(req, res) {
       message: enqueued.message
     });
   } catch (error) {
+    if (error.message && (error.message.includes('Path traversal') || error.message.includes('Invalid path format'))) {
+      return res.status(400).json({ error: error.message });
+    }
     const status = error.status || error.statusCode || 500;
     return res.status(status).json({ error: error.message });
   }
@@ -209,6 +215,9 @@ export async function getExtractionJobById(req, res) {
       updated_at: job.updated_at
     });
   } catch (error) {
+    if (error.message && (error.message.includes('Path traversal') || error.message.includes('Invalid path format'))) {
+      return res.status(400).json({ error: error.message });
+    }
     const status = error.status || error.statusCode || 500;
     return res.status(status).json({ error: error.message });
   }
