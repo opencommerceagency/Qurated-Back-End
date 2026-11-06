@@ -160,7 +160,9 @@ export async function processJob(jobId, options = {}, client = pool) {
        RETURNING *`,
       [jobId]
     );
-    job = updateRes.rows[0];
+    if (updateRes.rows.length > 0) {
+      job = updateRes.rows[0];
+    }
   }
 
   const currentAttempts = job.attempts;
@@ -195,27 +197,32 @@ export async function processJob(jobId, options = {}, client = pool) {
     let items = options.items;
     let fileType = 'csv';
 
-
     if (!items) {
       // Look up file record in files table
       const fileRes = await client.query('SELECT * FROM files WHERE id = $1', [job.file_id]);
       if (fileRes.rows.length > 0) {
         const fileRecord = fileRes.rows[0];
-        if (fileRecord.filename?.toLowerCase().endsWith('.pdf')) {
+        if (fileRecord.filename?.toLowerCase().endsWith('.pdf') || fileRecord.mime_type === 'application/pdf') {
           fileType = 'pdf';
         }
         if (fileRecord.file_path) {
           const safePath = getSanitizedPath(fileRecord.file_path);
           if (fs.existsSync(safePath)) {
-            const content = fs.readFileSync(safePath, 'utf-8');
-            try {
-              items = parse(content, {
-                columns: true,
-                skip_empty_lines: true,
-                trim: true
-              });
-            } catch {
-              items = [];
+            if (fileType === 'pdf') {
+              // PDF Document: do not parse with csv-parse! Treat as extraction document payload
+              const content = fs.readFileSync(safePath, 'utf-8');
+              items = [{ document: content, filename: fileRecord.filename, type: 'pdf' }];
+            } else {
+              const content = fs.readFileSync(safePath, 'utf-8');
+              try {
+                items = parse(content, {
+                  columns: true,
+                  skip_empty_lines: true,
+                  trim: true
+                });
+              } catch {
+                items = [];
+              }
             }
           }
         }
@@ -230,6 +237,7 @@ export async function processJob(jobId, options = {}, client = pool) {
     let processedRecords = 0;
     let failedRecords = 0;
     const jobErrors = [];
+    const aiMetadataList = [];
 
     // 4. Process items in chunks (default 500 items per chunk)
     const chunkSize = options.chunkSize || 500;
@@ -255,6 +263,12 @@ export async function processJob(jobId, options = {}, client = pool) {
               options
             });
             processedData = aiResult.data;
+            if (aiResult.metadata) {
+              aiMetadataList.push({
+                item_index: itemIndex,
+                ...aiResult.metadata
+              });
+            }
           }
 
           // Item validation & processing
@@ -281,20 +295,40 @@ export async function processJob(jobId, options = {}, client = pool) {
                 : typeof rawItem === 'object'
                   ? JSON.stringify(rawItem)
                   : String(rawItem);
-          } else if (compiledSchema && typeof processedData === 'object' && (processedData.supplier_sku || processedData.sku)) {
-            // Validate against compiled Zod schema
-            const parseResult = compiledSchema.safeParse(processedData);
-            if (!parseResult.success) {
+          } else if (processedData && (processedData.valid === true || processedData.is_valid === true)) {
+            itemValid = true;
+          } else if (compiledSchema) {
+            // Strict schema validation on all items: missing supplier_sku fails validation
+            if (!processedData || typeof processedData !== 'object') {
               itemValid = false;
-              errorMessage = parseResult.error.issues[0]?.message || 'Schema validation failed';
-              rawValue = JSON.stringify(processedData);
+              errorMessage = 'Invalid item payload';
+              rawValue = String(processedData);
             } else {
-              processedData = parseResult.data;
+              const hasSku = Boolean(
+                processedData.supplier_sku ||
+                processedData.sku ||
+                processedData.artikel_nr ||
+                processedData.item_number
+              );
+              if (!hasSku) {
+                itemValid = false;
+                errorMessage = 'supplier_sku is required';
+                rawValue = JSON.stringify(processedData);
+              } else {
+                const parseResult = compiledSchema.safeParse(processedData);
+                if (!parseResult.success) {
+                  itemValid = false;
+                  errorMessage = parseResult.error.issues[0]?.message || 'Schema validation failed';
+                  rawValue = JSON.stringify(processedData);
+                } else {
+                  processedData = parseResult.data;
+                }
+              }
             }
           }
 
           if (itemValid) {
-            // Idempotent UPSERT into extracted_products & extracted_attributes if product data has a SKU
+            // Idempotent UPSERT into extracted_products & extracted_attributes
             if (
               processedData &&
               typeof processedData === 'object' &&
@@ -355,6 +389,14 @@ export async function processJob(jobId, options = {}, client = pool) {
       finalStatus = 'FAILED';
     }
 
+    let aiLineageLog = '';
+    if (aiMetadataList.length > 0) {
+      const primaryCount = aiMetadataList.filter((m) => m.model_used === 'primary').length;
+      const fallbackCount = aiMetadataList.filter((m) => m.model_used === 'fallback').length;
+      const modelNames = [...new Set(aiMetadataList.map((m) => m.model_name))].join(', ');
+      aiLineageLog = `[${new Date().toISOString()}] AI Lineage: extracted ${aiMetadataList.length} item(s) using [${modelNames}] (primary: ${primaryCount}, fallback: ${fallbackCount})\n`;
+    }
+
     const updateRes = await client.query(
       `UPDATE extraction_jobs
        SET status = $1,
@@ -362,9 +404,10 @@ export async function processJob(jobId, options = {}, client = pool) {
            processed_records = $3,
            failed_records = $4,
            job_errors = $5,
+           logs = COALESCE(logs, '') || $6,
            locked_until = NULL,
            updated_at = NOW()
-       WHERE id = $6
+       WHERE id = $7
        RETURNING *`,
       [
         finalStatus,
@@ -372,19 +415,15 @@ export async function processJob(jobId, options = {}, client = pool) {
         processedRecords,
         failedRecords,
         JSON.stringify(jobErrors),
+        aiLineageLog,
         jobId
       ]
     );
 
     return updateRes.rows[0];
   } catch (error) {
-<<<<<<< HEAD
     // 5. Retry handling with exponential backoff on transient failure
-    if (currentAttempts < maxAttempts) {
-=======
-    // 4. Retry handling with exponential backoff on transient failure
     if (error.message !== 'Source file could not be read or parsed' && currentAttempts < maxAttempts) {
->>>>>>> feature/b3.1
       const delayMs = calculateBackoffMs(currentAttempts);
       const nextRetryAt = new Date(Date.now() + delayMs);
       const retryLog = `[${new Date().toISOString()}] Attempt ${currentAttempts}/${maxAttempts} failed: ${error.message}. Rescheduling retry in ${delayMs}ms\n`;
@@ -453,14 +492,15 @@ export async function processNextJob(options = {}) {
  *
  * @param {Object} [config={}] - Worker configuration
  * @param {number} [config.pollIntervalMs=1000] - Polling frequency
+ * @param {boolean} [config.useAi=true] - Defaults to using AI extraction in worker
  * @returns {void}
  */
-export function startExtractionWorker({ pollIntervalMs = 1000 } = {}) {
+export function startExtractionWorker({ pollIntervalMs = 1000, useAi = true } = {}) {
   if (workerIntervalId) return;
 
   workerIntervalId = setInterval(async () => {
     try {
-      await processNextJob();
+      await processNextJob({ useAi });
     } catch (err) {
       console.error('Extraction worker loop error:', err);
     }

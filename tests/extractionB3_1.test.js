@@ -34,7 +34,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
   const createdModelIds = [];
 
   before(async () => {
-    await pool.query('DELETE FROM extraction_jobs');
+    await pool.query('DELETE FROM extraction_jobs WHERE merchant_id = $1 OR merchant_id = $2', [merchantA, merchantB]);
     app = express();
     app.use(express.json());
     app.use('/api/extraction', extractionRouter);
