@@ -1,11 +1,12 @@
 import { describe, it, before, after } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert';
 import express from 'express';
 import { pool } from '../src/db/index.js';
 import extractionRouter from '../src/routes/extraction.js';
 import { validateFile, MAX_FILE_SIZE, MAX_PDF_PAGES, getSanitizedPath, SAFE_BASE_DIR } from '../src/services/fileValidator.js';
-import { getSanitizedPath as getSanitizedPathUtil } from '../src/utils/fileValidator.js';
-import { enqueueJob } from '../src/services/queueService.js';
+
+import { enqueueJob, claimNextPendingJob } from '../src/services/queueService.js';
 import { processJob, calculateBackoffMs } from '../src/workers/extractionWorker.js';
 
 process.env.API_KEY = process.env.API_KEY || 'qurated_dev_api_key_2026';
@@ -33,6 +34,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
   const createdModelIds = [];
 
   before(async () => {
+    await pool.query('DELETE FROM extraction_jobs WHERE merchant_id = $1 OR merchant_id = $2', [merchantA, merchantB]);
     app = express();
     app.use(express.json());
     app.use('/api/extraction', extractionRouter);
@@ -130,6 +132,9 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       assert.strictEqual(unitResult.valid, false);
       assert.strictEqual(unitResult.error, 'FILE_LIMIT_EXCEEDED');
 
+      const oversizedFileId = randomUUID();
+      createdFileIds.push(oversizedFileId);
+
       // 2. HTTP endpoint check
       const res = await fetch(`${baseUrl}/jobs`, {
         method: 'POST',
@@ -139,8 +144,9 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
           'x-merchant-id': merchantA
         },
         body: JSON.stringify({
-          file_id: validFileAId,
+          file_id: oversizedFileId,
           model_version_id: modelVersionAId,
+          filename: 'oversized.pdf',
           file_size: 26 * 1024 * 1024 // 26 MB
         })
       });
@@ -161,6 +167,9 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       assert.strictEqual(unitResult.valid, false);
       assert.strictEqual(unitResult.error, 'FILE_LIMIT_EXCEEDED');
 
+      const oversizedFileId = randomUUID();
+      createdFileIds.push(oversizedFileId);
+
       // 2. HTTP endpoint check
       const res = await fetch(`${baseUrl}/jobs`, {
         method: 'POST',
@@ -170,7 +179,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
           'x-merchant-id': merchantA
         },
         body: JSON.stringify({
-          file_id: validFileAId,
+          file_id: oversizedFileId,
           model_version_id: modelVersionAId,
           filename: 'heavy_document.pdf',
           total_pages: 55
@@ -203,6 +212,9 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       assert.strictEqual(bufferResult.valid, false);
       assert.strictEqual(bufferResult.error, 'UNSUPPORTED_ENCRYPTED_FILE');
 
+      const oversizedFileId = randomUUID();
+      createdFileIds.push(oversizedFileId);
+
       // 2. HTTP endpoint check
       const res = await fetch(`${baseUrl}/jobs`, {
         method: 'POST',
@@ -212,7 +224,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
           'x-merchant-id': merchantA
         },
         body: JSON.stringify({
-          file_id: validFileAId,
+          file_id: oversizedFileId,
           model_version_id: modelVersionAId,
           filename: 'locked.pdf',
           is_encrypted: true
@@ -235,6 +247,9 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       assert.strictEqual(unitResult.valid, false);
       assert.strictEqual(unitResult.error, 'OCR_REQUIRED_NO_TEXT_LAYER');
 
+      const oversizedFileId = randomUUID();
+      createdFileIds.push(oversizedFileId);
+
       // 2. HTTP endpoint check
       const res = await fetch(`${baseUrl}/jobs`, {
         method: 'POST',
@@ -244,7 +259,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
           'x-merchant-id': merchantA
         },
         body: JSON.stringify({
-          file_id: validFileAId,
+          file_id: oversizedFileId,
           model_version_id: modelVersionAId,
           filename: 'scanned.pdf',
           total_pages: 3,
@@ -280,7 +295,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
         /Path traversal detected: Access denied/
       );
       assert.throws(
-        () => getSanitizedPathUtil('../../../../secret.txt'),
+        () => getSanitizedPath('../../../../secret.txt'),
         /Path traversal detected: Access denied/
       );
       assert.throws(
@@ -328,6 +343,30 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       assert.strictEqual(res.status, 400);
       const data = await res.json();
       assert.ok(data.error.includes('Path traversal detected') || data.error.includes('Access denied'));
+
+      // 4. Missing file check (Fix #7)
+      const missingFileResult = validateFile({ filePath: 'uploads/non_existent_file.pdf' });
+      assert.strictEqual(missingFileResult.valid, false);
+      assert.strictEqual(missingFileResult.error, 'FILE_NOT_FOUND');
+      assert.strictEqual(missingFileResult.message, 'The specified file does not exist.');
+
+      // 5. Tenant Path Stealing check (Fix #3)
+      const stealRes = await fetch(`${baseUrl}/jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA
+        },
+        body: JSON.stringify({
+          file_id: randomUUID(),
+          model_version_id: modelVersionAId,
+          file_path: `uploads/${merchantB}/stolen_data.csv`
+        })
+      });
+      assert.strictEqual(stealRes.status, 400);
+      const stealData = await stealRes.json();
+      assert.ok(stealData.error.includes('Path traversal detected') || stealData.error.includes('Access denied'));
     });
 
     it('Valid file: Enqueue job and return 202 Accepted with job_id and initial status PENDING', async () => {
@@ -555,6 +594,63 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       const jobData = await getRes.json();
       assert.strictEqual(jobData.status, 'FAILED');
       assert.strictEqual(jobData.attempts, 3);
+    });
+
+    it('Job locking & recovery: claim sets 5-minute lock; expired lock allows recovery', async () => {
+      await pool.query("UPDATE extraction_jobs SET status = 'COMPLETED' WHERE status = 'PENDING'");
+      const enqueued = await enqueueJob({
+        merchant_id: merchantA,
+        file_id: validFileAId,
+        model_version_id: modelVersionAId
+      });
+      createdJobIds.push(enqueued.job_id);
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const claimed1 = await claimNextPendingJob(client);
+        await client.query('COMMIT');
+
+        assert.ok(claimed1);
+        assert.strictEqual(claimed1.id, enqueued.job_id);
+        assert.strictEqual(claimed1.status, 'PROCESSING');
+        assert.ok(claimed1.locked_until);
+        const lockTime = new Date(claimed1.locked_until).getTime();
+        const diffMs = lockTime - Date.now();
+        assert.ok(diffMs > 280000 && diffMs <= 310000);
+
+        await client.query('BEGIN');
+        const claimed2 = await claimNextPendingJob(client);
+        await client.query('COMMIT');
+        assert.strictEqual(claimed2, null);
+
+        await pool.query(
+          "UPDATE extraction_jobs SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1",
+          [enqueued.job_id]
+        );
+
+        await client.query('BEGIN');
+        const recoveredClaim = await claimNextPendingJob(client);
+        await client.query('COMMIT');
+        assert.ok(recoveredClaim);
+        assert.strictEqual(recoveredClaim.id, enqueued.job_id);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('Hard error on missing/empty source file: transitions immediately to FAILED', async () => {
+      const enqueued = await enqueueJob({
+        merchant_id: merchantA,
+        file_id: validFileAId,
+        model_version_id: modelVersionAId,
+        total_records: 0
+      });
+      createdJobIds.push(enqueued.job_id);
+
+      const failedJob = await processJob(enqueued.job_id);
+      assert.strictEqual(failedJob.status, 'FAILED');
+      assert.ok(failedJob.logs.includes('Source file could not be read or parsed'));
     });
   });
 

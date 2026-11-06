@@ -1,5 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
 import { pool } from '../src/db/index.js';
 import {
   compileModelZodSchema,
@@ -34,6 +36,8 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
   const createdFileIds = [];
 
   before(async () => {
+    process.env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || 'test_openrouter_api_key_2026';
+
     // 1. Seed Product Model and Version Snapshot
     const modelRes = await pool.query(
       `INSERT INTO product_models (merchant_id, name, description, status, schema_version, created_by, updated_by)
@@ -176,6 +180,28 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
       assert.strictEqual(rowZero.in_stock, false);
     });
 
+    it('should reject non-boolean strings like "nee" or "N/A"', () => {
+      const schema = compileModelZodSchema(schemaSnapshot);
+      assert.strictEqual(
+        schema.safeParse({
+          supplier_sku: 'SKU-BOOL-1',
+          length_mm: 20,
+          in_stock: 'nee',
+          grade: '8.8'
+        }).success,
+        false
+      );
+      assert.strictEqual(
+        schema.safeParse({
+          supplier_sku: 'SKU-BOOL-2',
+          length_mm: 20,
+          in_stock: 'N/A',
+          grade: '8.8'
+        }).success,
+        false
+      );
+    });
+
     it('should reject invalid list_of_values when value is not in allowed_values', () => {
       const schema = compileModelZodSchema(schemaSnapshot);
 
@@ -190,6 +216,26 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
       assert.strictEqual(parseResult.success, false);
     });
 
+    it('should match enum / list_of_values case-insensitively and normalize to canonical value', () => {
+      const colorSnapshot = {
+        name: 'Color Model',
+        attributes: [
+          {
+            name: 'Finish',
+            key: 'finish',
+            data_type: 'list_of_values',
+            is_required: true,
+            allowed_values: ['Zinc Plated', 'Galvanized', 'Black Oxide']
+          }
+        ]
+      };
+      const schema = compileModelZodSchema(colorSnapshot);
+      const res = schema.parse({ supplier_sku: 'SKU-F1', finish: 'zinc plated' });
+      assert.strictEqual(res.finish, 'Zinc Plated');
+      const res2 = schema.parse({ supplier_sku: 'SKU-F2', finish: 'GALVANIZED' });
+      assert.strictEqual(res2.finish, 'Galvanized');
+    });
+
     it('should reject missing or empty supplier_sku', () => {
       const schema = compileModelZodSchema(schemaSnapshot);
 
@@ -202,6 +248,34 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
       const parseResult = schema.safeParse(missingSku);
       assert.strictEqual(parseResult.success, false);
     });
+
+    it('should reject null and undefined for required string attributes without coercion bypass', () => {
+      const requiredStrSnapshot = {
+        name: 'Required String Model',
+        attributes: [
+          { name: 'Color', key: 'color', data_type: 'string', is_required: true }
+        ]
+      };
+      const schema = compileModelZodSchema(requiredStrSnapshot);
+      // Valid string passes
+      assert.strictEqual(schema.parse({ supplier_sku: 'SKU-C1', color: 'blue' }).color, 'blue');
+      // Null fails (not coerced to "null")
+      assert.strictEqual(schema.safeParse({ supplier_sku: 'SKU-C2', color: null }).success, false);
+      // Undefined fails
+      assert.strictEqual(schema.safeParse({ supplier_sku: 'SKU-C3' }).success, false);
+    });
+
+    it('should drop unknown keys from compiled schema to prevent database column overflow', () => {
+      const schema = compileModelZodSchema(schemaSnapshot);
+      const parsed = schema.parse({
+        supplier_sku: 'SKU-UNKNOWN-KEYS',
+        length_mm: 50,
+        in_stock: true,
+        grade: '8.8',
+        hallucinated_long_key_from_llm_that_exceeds_limits: 'bad value'
+      });
+      assert.strictEqual(parsed.hallucinated_long_key_from_llm_that_exceeds_limits, undefined);
+    });
   });
 
   describe('Scenario 2: Failover & Timeout Handling', () => {
@@ -211,6 +285,26 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
       assert.strictEqual(getExtractionTimeoutMs('pdf'), PDF_TIMEOUT_MS);
       assert.strictEqual(getExtractionTimeoutMs('PDF'), 60000);
       assert.strictEqual(getExtractionTimeoutMs('csv', 5000), 5000);
+    });
+
+    it('should throw early when OPENROUTER_API_KEY is missing or unconfigured', async () => {
+      const prevKey = process.env.OPENROUTER_API_KEY;
+      delete process.env.OPENROUTER_API_KEY;
+      try {
+        await assert.rejects(
+          async () => {
+            await extractWithFallback({
+              rawData: 'Fastener row',
+              fileType: 'csv',
+              schemaSnapshot,
+              options: { apiKey: null }
+            });
+          },
+          /OPENROUTER_API_KEY is missing or unconfigured/
+        );
+      } finally {
+        process.env.OPENROUTER_API_KEY = prevKey;
+      }
     });
 
     it('should succeed with primary model when primary call returns valid JSON', async () => {
@@ -355,6 +449,58 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
       assert.strictEqual(result.metadata.model_used, 'fallback');
       assert.strictEqual(result.data.supplier_sku, 'FALLBACK-SKU-502');
       assert.strictEqual(result.data.in_stock, false);
+    });
+
+    it('should NOT trigger fallback on HTTP 400, 401, 402, 429 client errors', async () => {
+      const calls401 = [];
+      const mock401Fetch = async (url, init) => {
+        const body = JSON.parse(init.body);
+        calls401.push(body.model);
+        return {
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+          text: async () => 'Invalid API key provided'
+        };
+      };
+
+      await assert.rejects(
+        async () => {
+          await extractWithFallback({
+            rawData: 'Test data',
+            fileType: 'csv',
+            schemaSnapshot,
+            options: { fetchFn: mock401Fetch }
+          });
+        },
+        (err) => err.status === 401 && !err.message.includes('fallback')
+      );
+      assert.deepStrictEqual(calls401, [DEFAULT_PRIMARY_MODEL]);
+
+      const calls429 = [];
+      const mock429Fetch = async (url, init) => {
+        const body = JSON.parse(init.body);
+        calls429.push(body.model);
+        return {
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          text: async () => 'Rate limit exceeded'
+        };
+      };
+
+      await assert.rejects(
+        async () => {
+          await extractWithFallback({
+            rawData: 'Test data',
+            fileType: 'csv',
+            schemaSnapshot,
+            options: { fetchFn: mock429Fetch }
+          });
+        },
+        (err) => err.status === 429 && !err.message.includes('fallback')
+      );
+      assert.deepStrictEqual(calls429, [DEFAULT_PRIMARY_MODEL]);
     });
 
     it('should failover when primary model returns invalid JSON schema output', async () => {
@@ -593,6 +739,129 @@ describe('User Story B3.2: OpenRouter Integration, Fallback Engine, and Idempote
         [merchantId, 'E2E-SKU-2']
       );
       assert.strictEqual(e2eProd2.rows.length, 1);
+    });
+
+    it('should record AI lineage metadata in job logs when useAi is active', async () => {
+      const enqueued = await enqueueJob({
+        merchant_id: merchantId,
+        file_id: fileId,
+        model_version_id: modelVersionId
+      });
+      createdJobIds.push(enqueued.job_id);
+
+      const mockAiFetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  supplier_sku: 'LINEAGE-SKU-001',
+                  thread_size: 'M8',
+                  length_mm: 35,
+                  in_stock: true,
+                  grade: '8.8'
+                })
+              }
+            }
+          ]
+        })
+      });
+
+      const processedJob = await processJob(enqueued.job_id, {
+        items: ['Fastener M8 35mm 8.8 in stock'],
+        useAi: true,
+        fetchFn: mockAiFetch
+      });
+
+      assert.strictEqual(processedJob.status, 'COMPLETED');
+      assert.ok(processedJob.logs);
+      assert.ok(processedJob.logs.includes('AI Lineage:'));
+      assert.ok(processedJob.logs.includes('primary: 1'));
+    });
+
+    it('should strictly fail items missing supplier_sku instead of bypassing validation', async () => {
+      const enqueued = await enqueueJob({
+        merchant_id: merchantId,
+        file_id: fileId,
+        model_version_id: modelVersionId
+      });
+      createdJobIds.push(enqueued.job_id);
+
+      const itemsMissingSku = [
+        {
+          thread_size: 'M10',
+          length_mm: 50,
+          in_stock: true,
+          grade: '8.8'
+        }
+      ];
+
+      const processedJob = await processJob(enqueued.job_id, { items: itemsMissingSku });
+
+      assert.strictEqual(processedJob.status, 'FAILED');
+      assert.strictEqual(processedJob.total_records, 1);
+      assert.strictEqual(processedJob.processed_records, 0);
+      assert.strictEqual(processedJob.failed_records, 1);
+      const errors = typeof processedJob.job_errors === 'string'
+        ? JSON.parse(processedJob.job_errors)
+        : processedJob.job_errors;
+      assert.strictEqual(errors[0].error, 'supplier_sku is required');
+    });
+
+    it('should treat PDF source files as document payloads without invoking csv-parse', async () => {
+      const uploadsDir = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads'));
+      if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+      const testPdfFullPath = path.join(uploadsDir, 'test_spec.pdf');
+      fs.writeFileSync(testPdfFullPath, '%PDF-1.4 Mock Binary Content Not CSV');
+
+      const pdfFileRes = await pool.query(
+        `INSERT INTO files (merchant_id, filename, file_size, mime_type, file_path, metadata)
+         VALUES ($1, 'spec_sheet.pdf', 1024, 'application/pdf', 'test_spec.pdf', '{"pages": 1}'::jsonb)
+         RETURNING id`,
+        [merchantId]
+      );
+      const pdfFileId = pdfFileRes.rows[0].id;
+      createdFileIds.push(pdfFileId);
+
+      const enqueued = await enqueueJob({
+        merchant_id: merchantId,
+        file_id: pdfFileId,
+        model_version_id: modelVersionId
+      });
+      createdJobIds.push(enqueued.job_id);
+
+      const mockPdfAiFetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  supplier_sku: 'PDF-EXTRACTED-001',
+                  thread_size: 'M16',
+                  length_mm: 120,
+                  in_stock: true,
+                  grade: '10.9'
+                })
+              }
+            }
+          ]
+        })
+      });
+
+      const processed = await processJob(enqueued.job_id, {
+        useAi: true,
+        fetchFn: mockPdfAiFetch
+      });
+
+      assert.strictEqual(processed.status, 'COMPLETED');
+      assert.strictEqual(processed.processed_records, 1);
+
+      // Clean up test file
+      if (fs.existsSync(testPdfFullPath)) fs.unlinkSync(testPdfFullPath);
     });
   });
 });
