@@ -1,5 +1,5 @@
 -- Up Migration
--- this makes sure the sources table has both type and protocol as sander asked
+-- Schema update: adds type, protocol, and runtime tracking columns to sources
 
 ALTER TABLE sources 
   ADD COLUMN IF NOT EXISTS type VARCHAR(32) DEFAULT 'csv',
@@ -9,7 +9,7 @@ ALTER TABLE sources
   ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
 -- Down Migration
--- this removes the extra columns if rolled back
+-- Down migration: drops additional source columns on rollback
 ALTER TABLE sources 
   DROP COLUMN IF EXISTS type,
   DROP COLUMN IF EXISTS default_model_id,

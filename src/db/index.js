@@ -1,9 +1,9 @@
 // Import the pg module to interact with PostgreSQL
 import pg from 'pg';
 
-// We explicitly delete these environment variables from process.env 
+// I explicitly delete these environment variables from process.env 
 // to prevent the pg library from picking up any unexpected global 
-// configurations that might conflict with our explicit Pool config below.
+// configurations that might conflict with my explicit Pool config below.
 delete process.env.PGUSER;
 delete process.env.PGPASSWORD;
 delete process.env.PGDATABASE;
