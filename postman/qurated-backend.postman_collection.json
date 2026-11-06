@@ -1,8 +1,8 @@
 {
   "info": {
     "_postman_id": "c1f7b920-56ef-468b-a45e-d98c5208b001",
-    "name": "Qurated Backend API - Milestone B1",
-    "description": "Comprehensive Postman collection for Qurated Supplier Ingestion, Source Management, and Pipeline Synchronization API.",
+    "name": "Qurated Backend API - Milestones B1 & B2",
+    "description": "Comprehensive Postman collection for Qurated Supplier Ingestion, Source Management, Product Data Models, and Schema Versioning Lineage API.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -25,229 +25,478 @@
       "key": "sourceId",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "modelId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "templateId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "attributeId",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
     {
-      "name": "1. List All Sources",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
-          },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/sources",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources"]
-        },
-        "description": "Retrieves all active and paused sources for the authenticated merchant."
-      },
-      "response": []
-    },
-    {
-      "name": "2. Create CSV Source",
-      "event": [
+      "name": "Milestone B1 - Sources & Ingestion",
+      "item": [
         {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "const response = pm.response.json();",
-              "if (response && response.id) {",
-              "    pm.collectionVariables.set('sourceId', response.id);",
-              "}"
+          "name": "1. List All Sources",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
             ],
-            "type": "text/javascript"
-          }
+            "url": {
+              "raw": "{{baseUrl}}/api/sources",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources"]
+            },
+            "description": "Retrieves all active and paused sources for the authenticated merchant."
+          },
+          "response": []
+        },
+        {
+          "name": "2. Create CSV Source",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const response = pm.response.json();",
+                  "if (response && response.id) {",
+                  "    pm.collectionVariables.set('sourceId', response.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" },
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"European Hardware Supplier CSV Feed\",\n  \"type\": \"csv\",\n  \"protocol\": \"HTTP\",\n  \"default_model_id\": \"google/gemini-flash-1.5\",\n  \"connection_config\": {\n    \"url\": \"https://raw.githubusercontent.com/datasets/gdp/master/data/gdp.csv\",\n    \"encoding\": \"windows-1252\",\n    \"delimiter\": \";\",\n    \"password\": \"supplier_secure_pass\"\n  },\n  \"schedule_cron\": \"0 2 * * *\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/sources",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources"]
+            },
+            "description": "Creates a new supplier data source with custom connection config and cron schedule."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Get Source Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/sources/{{sourceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources", "{{sourceId}}"]
+            },
+            "description": "Fetches details of a specific source with sensitive connection credentials masked."
+          },
+          "response": []
+        },
+        {
+          "name": "4. Update Source",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" },
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"European Hardware Supplier CSV Feed (Updated)\",\n  \"status\": \"ACTIVE\",\n  \"connection_config\": {\n    \"url\": \"https://example.com/updated_feed.csv\",\n    \"encoding\": \"utf-8\",\n    \"delimiter\": \",\"\n  },\n  \"schedule_cron\": \"*/30 * * * *\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/sources/{{sourceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources", "{{sourceId}}"]
+            },
+            "description": "Updates an existing data source's name, schedule, or configuration."
+          },
+          "response": []
+        },
+        {
+          "name": "5. Trigger Manual Ingestion Sync",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/sources/{{sourceId}}/sync",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources", "{{sourceId}}", "sync"]
+            },
+            "description": "Immediately triggers an on-demand synchronization run for the specified source (HTTP 202 Accepted)."
+          },
+          "response": []
+        },
+        {
+          "name": "6. Get Source Ingestion History",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/sources/{{sourceId}}/runs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources", "{{sourceId}}", "runs"]
+            },
+            "description": "Fetches all historical and active ingestion runs for the source."
+          },
+          "response": []
+        },
+        {
+          "name": "7. Soft Delete Source",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/sources/{{sourceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sources", "{{sourceId}}"]
+            },
+            "description": "Performs a clean soft-delete (status = ARCHIVED) keeping ingestion run history intact."
+          },
+          "response": []
         }
-      ],
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          },
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
-          },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"name\": \"European Hardware Supplier CSV Feed\",\n  \"type\": \"csv\",\n  \"protocol\": \"HTTP\",\n  \"default_model_id\": \"google/gemini-flash-1.5\",\n  \"connection_config\": {\n    \"url\": \"https://raw.githubusercontent.com/datasets/gdp/master/data/gdp.csv\",\n    \"encoding\": \"windows-1252\",\n    \"delimiter\": \";\",\n    \"password\": \"supplier_secure_pass\"\n  },\n  \"schedule_cron\": \"0 2 * * *\"\n}"
-        },
-        "url": {
-          "raw": "{{baseUrl}}/api/sources",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources"]
-        },
-        "description": "Creates a new supplier data source with custom connection config and cron schedule."
-      },
-      "response": []
+      ]
     },
     {
-      "name": "3. Get Source Details",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
+      "name": "Milestone B2 - Product Models & Schema Versioning",
+      "item": [
+        {
+          "name": "1. List Models (Merchant & Global)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models"]
+            },
+            "description": "Lists all active models scoped to the current merchant as well as shared global templates."
           },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/sources/{{sourceId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources", "{{sourceId}}"]
+          "response": []
         },
-        "description": "Fetches details of a specific source with sensitive connection credentials masked."
-      },
-      "response": []
+        {
+          "name": "2. Create Product Model",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const response = pm.response.json();",
+                  "if (response && response.id) {",
+                  "    pm.collectionVariables.set('modelId', response.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" },
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Precision Fasteners Catalog Model\",\n  \"description\": \"Comprehensive schema for industrial bolts, nuts, and screws\",\n  \"attributes\": [\n    {\n      \"name\": \"Thread Size\",\n      \"key\": \"thread_size\",\n      \"data_type\": \"string\",\n      \"is_required\": true,\n      \"unit_type\": \"metric\"\n    },\n    {\n      \"name\": \"Grade\",\n      \"key\": \"grade\",\n      \"data_type\": \"list_of_values\",\n      \"is_required\": true,\n      \"allowed_values\": [\"GRADE_8.8\", \"GRADE_10.9\", \"GRADE_12.9\"]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/models",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models"]
+            },
+            "description": "Creates a new custom product model for the merchant and records its initial schema version 1 snapshot."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Get Active Model Schema (Latest)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}"]
+            },
+            "description": "Retrieves the latest active model definition and all its current attributes."
+          },
+          "response": []
+        },
+        {
+          "name": "4. Query Historical Schema Version (B2.3)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}?version=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}"],
+              "query": [
+                { "key": "version", "value": "1", "description": "Specific historical schema version to retrieve" }
+              ]
+            },
+            "description": "Retrieves the exact immutable JSON snapshot for a specific historical schema version (User Story B2.3)."
+          },
+          "response": []
+        },
+        {
+          "name": "5. List Model Version History (B2.3)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}/versions",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}", "versions"]
+            },
+            "description": "Lists all historical schema versions and their snapshot metadata."
+          },
+          "response": []
+        },
+        {
+          "name": "6. Update Product Model Metadata",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" },
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Precision Fasteners Catalog Model (Updated)\",\n  \"description\": \"Updated description for industrial hardware components\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}"]
+            },
+            "description": "Updates model name or description. Protected against modifying global templates."
+          },
+          "response": []
+        },
+        {
+          "name": "7. Clone Base Industry Template",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const response = pm.response.json();",
+                  "if (response && response.id) {",
+                  "    pm.collectionVariables.set('modelId', response.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{templateId}}/clone",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{templateId}}", "clone"]
+            },
+            "description": "Deep-copies a global industry template and all its attributes into a custom merchant model."
+          },
+          "response": []
+        },
+        {
+          "name": "8. List Model Attributes",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}/attributes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}", "attributes"]
+            },
+            "description": "Lists all attributes currently configured on the specified model."
+          },
+          "response": []
+        },
+        {
+          "name": "9. Add Model Attribute (B2.2 & B2.3)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const response = pm.response.json();",
+                  "if (response && response.id) {",
+                  "    pm.collectionVariables.set('attributeId', response.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" },
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Finish Type\",\n  \"key\": \"finish_type\",\n  \"data_type\": \"list_of_values\",\n  \"is_required\": false,\n  \"allowed_values\": [\"ZINC_PLATED\", \"BLACK_OXIDE\", \"STAINLESS_RAW\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}/attributes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}", "attributes"]
+            },
+            "description": "Adds a new attribute to the model, increments the parent schema_version, and records a new version snapshot."
+          },
+          "response": []
+        },
+        {
+          "name": "10. Update Model Attribute (B2.2 & B2.3)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" },
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Finish Type (Industrial)\",\n  \"is_required\": true,\n  \"allowed_values\": [\"ZINC_PLATED\", \"BLACK_OXIDE\", \"STAINLESS_RAW\", \"HOT_DIP_GALVANIZED\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}/attributes/{{attributeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}", "attributes", "{{attributeId}}"]
+            },
+            "description": "Modifies an attribute definition, increments the schema_version, and records a new version snapshot."
+          },
+          "response": []
+        },
+        {
+          "name": "11. Delete Model Attribute (B2.2 & B2.3)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}/attributes/{{attributeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}", "attributes", "{{attributeId}}"]
+            },
+            "description": "Deletes an attribute definition, increments the schema_version, and records a new version snapshot."
+          },
+          "response": []
+        },
+        {
+          "name": "12. Soft Delete Product Model",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "x-api-key", "value": "{{apiKey}}", "type": "text" },
+              { "key": "x-merchant-id", "value": "{{merchantId}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/models/{{modelId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "models", "{{modelId}}"]
+            },
+            "description": "Soft-deletes a model (status = ARCHIVED), preserving previous version snapshots for historical extraction auditability."
+          },
+          "response": []
+        }
+      ]
     },
     {
-      "name": "4. Update Source",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
+      "name": "Documentation & System",
+      "item": [
+        {
+          "name": "Swagger UI Documentation",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api-docs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api-docs"]
+            },
+            "description": "Inspects the interactive OpenAPI/Swagger specification."
           },
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
+          "response": []
+        },
+        {
+          "name": "API Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Checks health of the Qurated API service and database connectivity."
           },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"name\": \"European Hardware Supplier CSV Feed (Updated)\",\n  \"status\": \"ACTIVE\",\n  \"connection_config\": {\n    \"url\": \"https://example.com/updated_feed.csv\",\n    \"encoding\": \"utf-8\",\n    \"delimiter\": \",\"\n  },\n  \"schedule_cron\": \"*/30 * * * *\"\n}"
-        },
-        "url": {
-          "raw": "{{baseUrl}}/api/sources/{{sourceId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources", "{{sourceId}}"]
-        },
-        "description": "Updates an existing data source's name, schedule, or configuration."
-      },
-      "response": []
-    },
-    {
-      "name": "5. Trigger Manual Ingestion Sync",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
-          },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/sources/{{sourceId}}/sync",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources", "{{sourceId}}", "sync"]
-        },
-        "description": "Immediately triggers an on-demand synchronization run for the specified source (HTTP 202 Accepted)."
-      },
-      "response": []
-    },
-    {
-      "name": "6. Get Source Ingestion History",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
-          },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/sources/{{sourceId}}/runs",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources", "{{sourceId}}", "runs"]
-        },
-        "description": "Fetches all historical and active ingestion runs for the source."
-      },
-      "response": []
-    },
-    {
-      "name": "7. Soft Delete Source",
-      "request": {
-        "method": "DELETE",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}",
-            "type": "text"
-          },
-          {
-            "key": "x-merchant-id",
-            "value": "{{merchantId}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/sources/{{sourceId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "sources", "{{sourceId}}"]
-        },
-        "description": "Performs a clean soft-delete (status = ARCHIVED) keeping ingestion run history intact."
-      },
-      "response": []
-    },
-    {
-      "name": "8. Swagger UI Documentation",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/api-docs",
-          "host": ["{{baseUrl}}"],
-          "path": ["api-docs"]
-        },
-        "description": "Inspects the interactive OpenAPI/Swagger specification."
-      },
-      "response": []
+          "response": []
+        }
+      ]
     }
   ]
 }
