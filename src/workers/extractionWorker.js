@@ -49,6 +49,7 @@ export async function processJob(jobId, options = {}, client = pool) {
       `UPDATE extraction_jobs
        SET status = 'PROCESSING',
            attempts = attempts + 1,
+           locked_until = NOW() + INTERVAL '5 minutes',
            updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
@@ -74,6 +75,7 @@ export async function processJob(jobId, options = {}, client = pool) {
     // 2. Resolve items to process: from options.items, or by parsing the associated file
     let items = options.items;
 
+
     if (!items) {
       // Look up file record in files table
       const fileRes = await client.query('SELECT * FROM files WHERE id = $1', [job.file_id]);
@@ -97,10 +99,8 @@ export async function processJob(jobId, options = {}, client = pool) {
       }
     }
 
-    // Fallback: if total_records is set but no items array, create indexed stub items
-    if (!items) {
-      const count = job.total_records || 0;
-      items = Array.from({ length: count }, (_, i) => ({ index: i }));
+    if (!items || items.length === 0) {
+      throw new Error('Source file could not be read or parsed');
     }
 
     const totalRecords = items.length;
@@ -186,6 +186,7 @@ export async function processJob(jobId, options = {}, client = pool) {
            processed_records = $3,
            failed_records = $4,
            job_errors = $5,
+           locked_until = NULL,
            updated_at = NOW()
        WHERE id = $6
        RETURNING *`,
@@ -202,7 +203,7 @@ export async function processJob(jobId, options = {}, client = pool) {
     return updateRes.rows[0];
   } catch (error) {
     // 4. Retry handling with exponential backoff on transient failure
-    if (currentAttempts < maxAttempts) {
+    if (error.message !== 'Source file could not be read or parsed' && currentAttempts < maxAttempts) {
       const delayMs = calculateBackoffMs(currentAttempts);
       const nextRetryAt = new Date(Date.now() + delayMs);
       const retryLog = `[${new Date().toISOString()}] Attempt ${currentAttempts}/${maxAttempts} failed: ${error.message}. Rescheduling retry in ${delayMs}ms\n`;
@@ -212,6 +213,7 @@ export async function processJob(jobId, options = {}, client = pool) {
          SET status = 'PENDING',
              next_retry_at = $1,
              logs = COALESCE(logs, '') || $2,
+             locked_until = NULL,
              updated_at = NOW()
          WHERE id = $3
          RETURNING *`,
@@ -227,6 +229,7 @@ export async function processJob(jobId, options = {}, client = pool) {
         `UPDATE extraction_jobs
          SET status = 'FAILED',
              logs = COALESCE(logs, '') || $1,
+             locked_until = NULL,
              updated_at = NOW()
          WHERE id = $2
          RETURNING *`,

@@ -31,6 +31,43 @@ export function getSanitizedPath(unsafePath) {
  * Extracts raw or decompressed stream bytes from a PDF buffer.
  * Attempts zlib inflation if FlateDecode is specified.
  */
+/**
+ * Sanitizes and validates an unsafe path against path traversal / LFI
+ * and enforces tenant isolation (must reside inside uploads/${merchantId}/).
+ *
+ * @param {string} unsafePath - The raw, potentially untrusted file path
+ * @param {string} merchantId - UUID of the merchant tenant
+ * @returns {string} Fully resolved and jailed absolute path for the tenant
+ */
+export function getSanitizedMerchantPath(unsafePath, merchantId) {
+  if (typeof unsafePath !== 'string' || !merchantId) {
+    throw new Error('Invalid path format');
+  }
+  if (unsafePath.indexOf('\0') !== -1) {
+    throw new Error('Invalid path format');
+  }
+
+  const merchantBase = path.resolve(SAFE_BASE_DIR, merchantId);
+
+  // Normalize separators and strip optional leading slashes or uploads/ prefix
+  let cleanPath = unsafePath.replace(/\\/g, '/');
+  if (cleanPath.startsWith('/')) {
+    cleanPath = cleanPath.slice(1);
+  }
+  if (cleanPath.startsWith('uploads/')) {
+    cleanPath = cleanPath.slice(8);
+  }
+
+  const targetPath = path.resolve(SAFE_BASE_DIR, cleanPath);
+
+  // Must strictly stay inside merchantBase
+  if (!targetPath.startsWith(merchantBase + path.sep)) {
+    throw new Error('Path traversal detected: Access denied');
+  }
+
+  return targetPath;
+}
+
 function extractPdfStreams(buffer) {
   const streams = [];
   const str = buffer.toString('binary');
@@ -210,6 +247,12 @@ export function validateFile(input) {
         fileSize = input.size || stat.size;
         filename = input.filename || input.filePath;
         buffer = fs.readFileSync(safePath);
+      } else {
+        return {
+          valid: false,
+          error: 'FILE_NOT_FOUND',
+          message: 'The specified file does not exist.'
+        };
       }
     } else if (typeof input.content === 'string') {
       buffer = Buffer.from(input.content, 'utf-8');
@@ -352,5 +395,6 @@ export default {
   MAX_PDF_PAGES,
   SAFE_BASE_DIR,
   getSanitizedPath,
+  getSanitizedMerchantPath,
   validateFile
 };

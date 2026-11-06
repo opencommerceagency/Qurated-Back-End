@@ -102,8 +102,10 @@ export async function claimNextPendingJob(client) {
   const result = await client.query(
     `SELECT *
      FROM extraction_jobs
-     WHERE status = 'PENDING'
-       AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+     WHERE (
+       (status = 'PENDING' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
+       OR (status = 'PROCESSING' AND locked_until < NOW())
+     )
      ORDER BY created_at ASC
      LIMIT 1
      FOR UPDATE SKIP LOCKED`
@@ -115,11 +117,12 @@ export async function claimNextPendingJob(client) {
 
   const job = result.rows[0];
 
-  // Increment attempts and update status to PROCESSING atomically
+  // Increment attempts and update status to PROCESSING atomically with a 5-minute lock
   const updatedResult = await client.query(
     `UPDATE extraction_jobs
      SET status = 'PROCESSING',
          attempts = attempts + 1,
+         locked_until = NOW() + INTERVAL '5 minutes',
          updated_at = NOW()
      WHERE id = $1
      RETURNING *`,
