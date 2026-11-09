@@ -2,18 +2,8 @@ import { downloadFtpStream } from './ftpDownloader.js';
 import { downloadHttpStream } from './httpDownloader.js';
 import { failIngestionRun } from '../db/ingestionHelpers.js';
 
-/**
- * Resolves the transport protocol ('FTP' or 'HTTP') for a given source.
- * 
- * Inspects:
- * 1. source.protocol (case-insensitive)
- * 2. source.connection_config?.protocol (case-insensitive)
- * 3. source.connection_config?.url scheme (ftp:// vs http://)
- * 4. Fallback to source.type if explicitly set to FTP/HTTP
- * 
- * @param {Object} source
- * @returns {'FTP'|'HTTP'|null}
- */
+// Resolves transport protocol ('FTP' or 'HTTP') by checking explicit protocol flags,
+// URL scheme prefixes, and fallback connection properties
 export function resolveProtocol(source) {
   const connConfig = source?.connection_config || {};
 
@@ -56,14 +46,7 @@ export function resolveProtocol(source) {
   return null;
 }
 
-/**
- * Inspects the source configuration and routes the download request 
- * to either the FTP or HTTP downloader stream.
- *
- * @param {Object} source - The source configuration from the database
- * @param {string|number} runId - The ID of the current ingestion run
- * @returns {Promise<import('stream').PassThrough|null>} The downloaded readable stream, or null if failed
- */
+// Routes download requests to the FTP or HTTP streaming downloader
 export async function fetchSourceStream(source, runId) {
   try {
     const protocol = resolveProtocol(source);
@@ -78,15 +61,12 @@ export async function fetchSourceStream(source, runId) {
       throw new Error(`Unable to determine transport protocol for source: ${source?.name || source?.id || 'unknown'}`);
     }
     
-    // Return the readable stream to the caller
     return stream;
   } catch (error) {
-    // On failure (timeout, bad credentials, HTML response, etc), record the error in DB
+    // Record run failure on connection errors before rethrowing
     if (runId) {
       await failIngestionRun(runId, error.message);
     }
-    
-    // Re-throw the error so downstream callers know it failed
     throw error;
   }
 }
