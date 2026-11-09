@@ -608,7 +608,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        const claimed1 = await claimNextPendingJob(client);
+        const claimed1 = await claimNextPendingJob(client, { jobId: enqueued.job_id });
         await client.query('COMMIT');
 
         assert.ok(claimed1);
@@ -620,7 +620,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
         assert.ok(diffMs > 280000 && diffMs <= 310000);
 
         await client.query('BEGIN');
-        const claimed2 = await claimNextPendingJob(client);
+        const claimed2 = await claimNextPendingJob(client, { jobId: enqueued.job_id });
         await client.query('COMMIT');
         assert.strictEqual(claimed2, null);
 
@@ -630,7 +630,7 @@ describe('User Story B3.1: Asynchronous Job Queue & Runner Architecture', () => 
         );
 
         await client.query('BEGIN');
-        const recoveredClaim = await claimNextPendingJob(client);
+        const recoveredClaim = await claimNextPendingJob(client, { jobId: enqueued.job_id });
         await client.query('COMMIT');
         assert.ok(recoveredClaim);
         assert.strictEqual(recoveredClaim.id, enqueued.job_id);

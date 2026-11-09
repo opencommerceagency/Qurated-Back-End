@@ -54,20 +54,29 @@ function areUnitsEquivalent(val1, unit1, val2, unit2) {
 }
 
 /**
- * Checks boolean semantic equivalents in raw text.
+ * Checks boolean semantic equivalents in raw text with strict boundary matching.
+ * Does not match stray '0' or '1' inside arbitrary numbers or sentences.
  */
 function isBooleanEquivalent(extractedBool, rawText) {
   if (typeof extractedBool !== 'boolean' || !rawText) return false;
 
-  const text = String(rawText).toLowerCase();
+  const text = String(rawText).toLowerCase().trim();
 
   if (extractedBool === true) {
-    const positivePattern = /\b(yes|ja|in\s*stock|op\s*voorraad|true|1|available|beschikbaar)\b/i;
+    if (text === '1') return true;
+    if (/(?:^|\s|[:=])1(?:\s|$)/.test(text) && /\b(?:in_?stock|stock|available|active|enabled|voorraad)\b/i.test(text)) {
+      return true;
+    }
+    const positivePattern = /\b(yes|ja|in\s*stock|op\s*voorraad|true|available|beschikbaar)\b/i;
     return positivePattern.test(text);
   }
 
   if (extractedBool === false) {
-    const negativePattern = /\b(no|nee|out\s*of\s*stock|niet\s*op\s*voorraad|false|0|unavailable|geen\s*voorraad)\b/i;
+    if (text === '0') return true;
+    if (/(?:^|\s|[:=])0(?:\s|$)/.test(text) && /\b(?:in_?stock|stock|available|active|enabled|voorraad)\b/i.test(text)) {
+      return true;
+    }
+    const negativePattern = /\b(no|nee|out\s*of\s*stock|niet\s*op\s*voorraad|false|unavailable|geen\s*voorraad)\b/i;
     return negativePattern.test(text);
   }
 
@@ -125,8 +134,8 @@ export function calculateConfidenceScore({
     return 100;
   }
 
-  // Punctuation-stripped exact match
-  const stripPunct = (s) => s.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, '').replace(/\s+/g, ' ').trim();
+  // Punctuation-stripped exact match (preserves commas and decimals to keep number semantics)
+  const stripPunct = (s) => s.replace(/[/#!$%^&*;:{}=\-_`~()]/g, '').replace(/\s+/g, ' ').trim();
   if (stripPunct(rawStr) === stripPunct(extStr) && extStr.length > 0) {
     return 95;
   }
@@ -186,33 +195,28 @@ export function calculateConfidenceScore({
     }
   }
 
-  if (!isNaN(effectiveExtNum)) {
-    // Check if rawSourceValue itself is an embedded unit
-    const rawUnitData = extractUnit(rawStr);
-    if (rawUnitData) {
-      if (effectiveUnit && areUnitsEquivalent(rawUnitData.value, rawUnitData.unit, effectiveExtNum, effectiveUnit)) {
-        return 85;
-      }
-      for (const [candUnit, conf] of Object.entries(UNIT_CONVERSIONS)) {
-        if (conf.base === UNIT_CONVERSIONS[rawUnitData.unit]?.base) {
-          if (areUnitsEquivalent(rawUnitData.value, rawUnitData.unit, effectiveExtNum, candUnit)) {
+  if (effectiveUnit && !isNaN(effectiveExtNum)) {
+    const declaredConf = UNIT_CONVERSIONS[effectiveUnit.toLowerCase()];
+    if (declaredConf) {
+      // Check if rawSourceValue itself is an embedded unit with the same base
+      const rawUnitData = extractUnit(rawStr);
+      if (rawUnitData) {
+        const rawConf = UNIT_CONVERSIONS[rawUnitData.unit?.toLowerCase()];
+        if (rawConf && rawConf.base === declaredConf.base) {
+          if (areUnitsEquivalent(rawUnitData.value, rawUnitData.unit, effectiveExtNum, effectiveUnit)) {
             return 85;
           }
         }
       }
-    }
 
-    // Check if raw string contains a composite unit token anywhere (e.g., "Weight: 1.3 kg")
-    const compositeMatches = rawStr.match(/([\d.,]+)\s*([a-zA-Z]+)/g) || [];
-    for (const comp of compositeMatches) {
-      const parsedComp = extractUnit(comp);
-      if (parsedComp) {
-        if (effectiveUnit && areUnitsEquivalent(parsedComp.value, parsedComp.unit, effectiveExtNum, effectiveUnit)) {
-          return 85;
-        }
-        for (const [candUnit, conf] of Object.entries(UNIT_CONVERSIONS)) {
-          if (conf.base === UNIT_CONVERSIONS[parsedComp.unit]?.base) {
-            if (areUnitsEquivalent(parsedComp.value, parsedComp.unit, effectiveExtNum, candUnit)) {
+      // Check if raw string contains a composite unit token anywhere with the same base (e.g., "Weight: 1.3 kg")
+      const compositeMatches = rawStr.match(/([\d.,]+)\s*([a-zA-Z]+)/g) || [];
+      for (const comp of compositeMatches) {
+        const parsedComp = extractUnit(comp);
+        if (parsedComp) {
+          const compConf = UNIT_CONVERSIONS[parsedComp.unit?.toLowerCase()];
+          if (compConf && compConf.base === declaredConf.base) {
+            if (areUnitsEquivalent(parsedComp.value, parsedComp.unit, effectiveExtNum, effectiveUnit)) {
               return 85;
             }
           }

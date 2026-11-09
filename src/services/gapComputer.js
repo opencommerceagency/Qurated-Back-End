@@ -337,12 +337,14 @@ export async function computeAndSyncProductGaps(
 
 /**
  * Promotes or transitions a product's state with strict illegal promotion guards.
+ * Enforces the NEEDS_REVIEW -> ENRICHED promotion inside a single database transaction
+ * using SELECT ... FOR UPDATE to prevent race conditions.
  *
  * @param {string} productId - Product UUID
  * @param {'PROCESSING'|'NEEDS_REVIEW'|'ENRICHED'|'FAILED_EXTRACTION'} targetState - Desired state
  * @param {Object} [client=pool] - Active database client
  * @returns {Promise<Object>} Updated product record
- * @throws {Error} Throws 409 Conflict if attempting to promote to ENRICHED with active gaps
+ * @throws {Error} Throws 409 Conflict if attempting to promote to ENRICHED with active gaps or from an invalid state
  */
 export async function promoteProductState(productId, targetState, client = pool) {
   const allowedStates = ['PROCESSING', 'NEEDS_REVIEW', 'ENRICHED', 'FAILED_EXTRACTION'];
@@ -353,43 +355,83 @@ export async function promoteProductState(productId, targetState, client = pool)
     throw err;
   }
 
-  // Check product existence
-  const prodRes = await client.query('SELECT * FROM extracted_products WHERE id = $1', [productId]);
-  if (prodRes.rows.length === 0) {
-    const err = new Error(`Product not found: ${productId}`);
-    err.status = 404;
-    err.statusCode = 404;
-    throw err;
+  const isDedicatedClient = client !== pool;
+  const dbClient = isDedicatedClient ? client : await pool.connect();
+  const shouldManageTransaction = !isDedicatedClient;
+
+  if (shouldManageTransaction) {
+    await dbClient.query('BEGIN');
   }
 
-  // Guard: Promotion to ENRICHED requires 0 active gaps
-  if (targetState === 'ENRICHED') {
-    const gapCountRes = await client.query(
-      'SELECT COUNT(*)::int AS count FROM product_gaps WHERE product_id = $1',
+  try {
+    // 1. Lock product row with SELECT ... FOR UPDATE to prevent race conditions
+    const prodRes = await dbClient.query(
+      'SELECT * FROM extracted_products WHERE id = $1 FOR UPDATE',
       [productId]
     );
-    const activeGaps = gapCountRes.rows[0].count;
 
-    if (activeGaps > 0) {
-      const conflictError = new Error('Product has unresolved gaps and cannot transition to ENRICHED.');
-      conflictError.status = 409;
-      conflictError.statusCode = 409;
-      conflictError.error = 'CANNOT_PROMOTE_WITH_ACTIVE_GAPS';
-      conflictError.activeGapsCount = activeGaps;
-      throw conflictError;
+    if (prodRes.rows.length === 0) {
+      const err = new Error(`Product not found: ${productId}`);
+      err.status = 404;
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const currentProduct = prodRes.rows[0];
+
+    // 2. Explicitly deny illegal transitions (e.g. direct from PROCESSING or FAILED_EXTRACTION to ENRICHED)
+    if (targetState === 'ENRICHED') {
+      if (currentProduct.state !== 'NEEDS_REVIEW') {
+        const transitionError = new Error(
+          `Illegal state transition: Cannot promote product from "${currentProduct.state}" to "ENRICHED". Product must be in "NEEDS_REVIEW" before promotion.`
+        );
+        transitionError.status = 409;
+        transitionError.statusCode = 409;
+        transitionError.error = 'ILLEGAL_STATE_TRANSITION';
+        throw transitionError;
+      }
+
+      // Guard: Promotion to ENRICHED requires 0 active gaps
+      const gapCountRes = await dbClient.query(
+        'SELECT COUNT(*)::int AS count FROM product_gaps WHERE product_id = $1',
+        [productId]
+      );
+      const activeGaps = gapCountRes.rows[0].count;
+
+      if (activeGaps > 0) {
+        const conflictError = new Error('Product has unresolved gaps and cannot transition to ENRICHED.');
+        conflictError.status = 409;
+        conflictError.statusCode = 409;
+        conflictError.error = 'CANNOT_PROMOTE_WITH_ACTIVE_GAPS';
+        conflictError.activeGapsCount = activeGaps;
+        throw conflictError;
+      }
+    }
+
+    const updateRes = await dbClient.query(
+      `UPDATE extracted_products
+       SET state = $1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [targetState, productId]
+    );
+
+    if (shouldManageTransaction) {
+      await dbClient.query('COMMIT');
+    }
+
+    return updateRes.rows[0];
+  } catch (err) {
+    if (shouldManageTransaction) {
+      await dbClient.query('ROLLBACK').catch(() => { });
+    }
+    throw err;
+  } finally {
+    if (shouldManageTransaction) {
+      dbClient.release();
     }
   }
-
-  const updateRes = await client.query(
-    `UPDATE extracted_products
-     SET state = $1,
-         updated_at = NOW()
-     WHERE id = $2
-     RETURNING *`,
-    [targetState, productId]
-  );
-
-  return updateRes.rows[0];
 }
 
 /**
