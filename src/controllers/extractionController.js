@@ -2,7 +2,7 @@ import fs from 'fs';
 import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { enqueueJob, getJobById } from '../services/queueService.js';
-import { validateFile, getSanitizedPath } from '../services/fileValidator.js';
+import { validateFile, getSanitizedMerchantPath } from '../services/fileValidator.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -74,8 +74,9 @@ async function resolveAndVerifyFile(fileId, merchantId, reqBody = {}, client = p
     reqBody.text_content !== undefined
   ) {
     let size = reqBody.file_size || 0;
+    let safePath = null;
     if (!size && reqBody.file_path) {
-      const safePath = getSanitizedPath(reqBody.file_path);
+      safePath = getSanitizedMerchantPath(reqBody.file_path, merchantId);
       if (fs.existsSync(safePath)) {
         size = fs.statSync(safePath).size;
       }
@@ -91,10 +92,15 @@ async function resolveAndVerifyFile(fileId, merchantId, reqBody = {}, client = p
         fileId,
         merchantId,
         reqBody.filename || 'uploaded_document',
-        reqBody.file_path || null,
+        safePath || null,
         size,
         reqBody.mime_type || null,
-        JSON.stringify(reqBody.metadata || {})
+        JSON.stringify(reqBody.metadata || {
+          total_pages: reqBody.total_pages ?? reqBody.pageCount,
+          is_encrypted: reqBody.is_encrypted ?? reqBody.isEncrypted,
+          text_content: reqBody.text_content ?? reqBody.textContent,
+          content: reqBody.file_content
+        })
       ]
     );
 
@@ -137,19 +143,26 @@ export async function createExtractionJob(req, res) {
 
     const fileRecord = fileCheck.file;
 
-    // 3. Run fileValidator guardrails synchronously
+    if (req.body.file_path) {
+      getSanitizedMerchantPath(req.body.file_path, merchantId);
+    }
+
+    // 3. Run fileValidator guardrails synchronously (strictly preferring DB truth)
+    const meta = fileRecord.metadata || {};
     const fileToValidate = {
-      filePath: req.body.file_path || fileRecord.file_path,
-      size: req.body.file_size !== undefined ? Number(req.body.file_size) : Number(fileRecord.file_size),
-      filename: req.body.filename || fileRecord.filename,
-      mimeType: req.body.mime_type || fileRecord.mime_type,
-      total_pages: req.body.total_pages,
-      pageCount: req.body.pageCount,
-      is_encrypted: req.body.is_encrypted,
-      isEncrypted: req.body.isEncrypted,
-      text_content: req.body.text_content,
-      textContent: req.body.textContent,
-      content: req.body.file_content
+      filePath: fileRecord.file_path || req.body.file_path || null,
+      size: (fileRecord.file_size !== null && fileRecord.file_size !== undefined && Number(fileRecord.file_size) > 0)
+        ? Number(fileRecord.file_size)
+        : (req.body.file_size !== undefined ? Number(req.body.file_size) : 0),
+      filename: fileRecord.filename || req.body.filename || '',
+      mimeType: fileRecord.mime_type || req.body.mime_type || '',
+      total_pages: (meta.total_pages !== undefined ? meta.total_pages : meta.pages) ?? req.body.total_pages ?? req.body.pageCount,
+      pageCount: (meta.pageCount !== undefined ? meta.pageCount : meta.pages) ?? req.body.pageCount ?? req.body.total_pages,
+      is_encrypted: meta.is_encrypted ?? meta.isEncrypted ?? req.body.is_encrypted ?? req.body.isEncrypted,
+      isEncrypted: meta.isEncrypted ?? meta.is_encrypted ?? req.body.isEncrypted ?? req.body.is_encrypted,
+      text_content: meta.text_content ?? meta.textContent ?? req.body.text_content ?? req.body.textContent,
+      textContent: meta.textContent ?? meta.text_content ?? req.body.textContent ?? req.body.text_content,
+      content: meta.content ?? req.body.file_content
     };
 
     const validation = validateFile(fileToValidate);

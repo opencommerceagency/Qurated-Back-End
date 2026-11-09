@@ -45,6 +45,40 @@ export function sanitizeJsonResponse(content) {
 }
 
 /**
+ * Determines whether a model error qualifies for fallback failover.
+ * - Restricts fallback specifically to Timeouts and 5xx Server Errors (and model schema/output issues).
+ * - Explicitly rejects fallback on 400, 401, 402, 429 and all 4xx client errors.
+ *
+ * @param {Error} err - Caught error from primary model execution
+ * @returns {boolean} True if fallback model should be attempted
+ */
+export function isFallbackEligibleError(err) {
+  if (!err) return false;
+
+  // Never fall back on HTTP 4xx errors (400 Bad Request, 401 Unauthorized, 402 Payment Required, 429 Rate Limit, etc.)
+  if (typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
+    return false;
+  }
+
+  // Fall back on Timeouts (AbortError or timeout message)
+  if (err.name === 'AbortError' || /timed?\s*out|aborted/i.test(err.message || '')) {
+    return true;
+  }
+
+  // Fall back on 5xx Server Errors
+  if (typeof err.status === 'number' && err.status >= 500 && err.status < 600) {
+    return true;
+  }
+
+  // Fall back on schema validation failures or invalid/empty response content
+  if (err.name === 'ZodError' || err instanceof SyntaxError || (err.message && err.message.includes('Empty response content'))) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Executes a single AI completion call with timeout, response parsing, and schema validation.
  */
 async function callModelWithSchema({
@@ -101,7 +135,9 @@ async function callModelWithSchema({
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      throw new Error(`OpenRouter API error (HTTP ${response.status}): ${errorText || response.statusText}`);
+      const err = new Error(`OpenRouter API error (HTTP ${response.status}): ${errorText || response.statusText}`);
+      err.status = response.status;
+      throw err;
     }
 
     const jsonRes = await response.json();
@@ -139,6 +175,7 @@ async function callModelWithSchema({
  * Extracts product data with dynamic model failover and per-file-type timeouts:
  * 1. Tries OPENROUTER_PRIMARY_MODEL within the computed timeout window.
  * 2. On timeout (AbortError), HTTP 5xx, or schema failure, immediately falls back to OPENROUTER_FALLBACK_MODEL.
+ *    (Rejects fallback on 400, 401, 402, 429 and other 4xx errors).
  * 3. Returns validated product data and execution metadata (`model_used: 'primary' | 'fallback'`).
  *
  * @param {Object} params - Extraction parameters
@@ -154,7 +191,11 @@ export async function extractWithFallback({
   schemaSnapshot,
   options = {}
 }) {
-  const apiKey = options.apiKey || process.env.OPENROUTER_API_KEY || 'dummy_openrouter_api_key';
+  const apiKey = options.apiKey || process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENROUTER_API_KEY is missing or unconfigured');
+  }
+
   const baseUrl = options.baseUrl || process.env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL;
   const primaryModel = options.primaryModel || process.env.OPENROUTER_PRIMARY_MODEL || DEFAULT_PRIMARY_MODEL;
   const fallbackModel = options.fallbackModel || process.env.OPENROUTER_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
@@ -185,6 +226,10 @@ export async function extractWithFallback({
       }
     };
   } catch (primaryErr) {
+    if (!isFallbackEligibleError(primaryErr)) {
+      throw primaryErr;
+    }
+
     console.warn(
       `[AIClient] Primary model (${primaryModel}) failed (${primaryErr.name || 'Error'}: ${primaryErr.message}). ` +
       `Failing over to fallback model (${fallbackModel})...`
@@ -226,5 +271,6 @@ export default {
   PDF_TIMEOUT_MS,
   getExtractionTimeoutMs,
   sanitizeJsonResponse,
+  isFallbackEligibleError,
   extractWithFallback
 };

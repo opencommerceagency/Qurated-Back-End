@@ -11,6 +11,7 @@ import modelRoutes from './src/routes/models.js';
 import extractionRoutes from './src/routes/extraction.js';
 import productRoutes from './src/routes/products.js';
 import { startCronWorker } from './src/workers/cron.js';
+import { startExtractionWorker } from './src/workers/extractionWorker.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerDocument } from './src/swagger.js';
 
@@ -121,6 +122,7 @@ app.listen(port, async () => {
         }
 
         startCronWorker();
+        startExtractionWorker();
     } catch (err) {
         console.error('Database connection failed:', err);
     }

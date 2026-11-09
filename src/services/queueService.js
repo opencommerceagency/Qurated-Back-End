@@ -96,17 +96,32 @@ export async function getJobById(jobId, merchantId, client = pool) {
  * Atomically claims the next due PENDING job using FOR UPDATE SKIP LOCKED.
  *
  * @param {Object} client - Active database connection client (required for row lock)
+ * @param {Object} [options={}] - Optional query filters (jobId, merchantId)
  * @returns {Promise<Object|null>} The claimed job row or null if queue is empty
  */
-export async function claimNextPendingJob(client) {
+export async function claimNextPendingJob(client, options = {}) {
+  const params = [];
+  let whereConditions = `(
+    (status = 'PENDING' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
+    OR (status = 'PROCESSING' AND locked_until < NOW())
+  )`;
+
+  if (options && options.jobId) {
+    params.push(options.jobId);
+    whereConditions += ` AND id = $${params.length}`;
+  } else if (options && options.merchantId) {
+    params.push(options.merchantId);
+    whereConditions += ` AND merchant_id = $${params.length}`;
+  }
+
   const result = await client.query(
     `SELECT *
      FROM extraction_jobs
-     WHERE status = 'PENDING'
-       AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+     WHERE ${whereConditions}
      ORDER BY created_at ASC
      LIMIT 1
-     FOR UPDATE SKIP LOCKED`
+     FOR UPDATE SKIP LOCKED`,
+    params
   );
 
   if (result.rows.length === 0) {
@@ -115,11 +130,12 @@ export async function claimNextPendingJob(client) {
 
   const job = result.rows[0];
 
-  // Increment attempts and update status to PROCESSING atomically
+  // Increment attempts and update status to PROCESSING atomically with a 5-minute lock
   const updatedResult = await client.query(
     `UPDATE extraction_jobs
      SET status = 'PROCESSING',
          attempts = attempts + 1,
+         locked_until = NOW() + INTERVAL '5 minutes',
          updated_at = NOW()
      WHERE id = $1
      RETURNING *`,

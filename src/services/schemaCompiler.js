@@ -3,6 +3,7 @@ import { z } from 'zod';
 /**
  * Preprocesses and coerces values to boolean safely.
  * Handles boolean types, numbers, and strings like "true"/"false", "1"/"0", "yes"/"no".
+ * Returns raw value if not definitively boolean-like, letting z.boolean() properly reject it.
  */
 const safeBooleanCoerce = z.preprocess((val) => {
   if (val === null || val === undefined) return val;
@@ -11,9 +12,14 @@ const safeBooleanCoerce = z.preprocess((val) => {
     const trimmed = val.trim().toLowerCase();
     if (trimmed === 'true' || trimmed === '1' || trimmed === 'yes') return true;
     if (trimmed === 'false' || trimmed === '0' || trimmed === 'no') return false;
+    return val;
   }
-  if (typeof val === 'number') return val !== 0;
-  return Boolean(val);
+  if (typeof val === 'number') {
+    if (val === 1) return true;
+    if (val === 0) return false;
+    return val;
+  }
+  return val;
 }, z.boolean());
 
 /**
@@ -52,16 +58,25 @@ export function compileAttributeFieldSchema(attr) {
         : [];
 
       if (validList.length > 0) {
-        fieldSchema = z.enum(validList);
+        const canonicalMap = new Map();
+        for (const item of validList) {
+          canonicalMap.set(item.toLowerCase(), item);
+        }
+        fieldSchema = z.preprocess((val) => {
+          if (val === null || val === undefined) return val;
+          const strVal = String(val).trim();
+          const canonical = canonicalMap.get(strVal.toLowerCase());
+          return canonical !== undefined ? canonical : val;
+        }, z.enum(validList));
       } else {
-        fieldSchema = z.coerce.string();
+        fieldSchema = z.string();
       }
       break;
     }
 
     case 'string':
     default:
-      fieldSchema = z.coerce.string();
+      fieldSchema = z.string();
       if (attr.is_required) {
         fieldSchema = fieldSchema.trim().min(1, { message: `${attr.key || attr.name} is required` });
       }
@@ -79,6 +94,7 @@ export function compileAttributeFieldSchema(attr) {
 /**
  * Converts a historical model snapshot (`product_model_versions.snapshot`) into an
  * executable Zod object schema at runtime.
+ * Unknown keys are dropped (no .passthrough()) to prevent LLM inventions from breaching DB limits.
  *
  * @param {Object|Array} snapshot - The model snapshot object or attributes array
  * @returns {z.ZodObject} Compiled Zod schema requiring supplier_sku and snapshot attributes
@@ -112,7 +128,7 @@ export function compileModelZodSchema(snapshot) {
     shape[key] = compileAttributeFieldSchema(attr);
   }
 
-  return z.object(shape).passthrough();
+  return z.object(shape);
 }
 
 /**
