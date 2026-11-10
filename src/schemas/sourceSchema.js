@@ -1,12 +1,11 @@
-// this is what sander asked: keeping format and protocol strictly separate
+// Keep data format (CSV/XML) and transport protocol (HTTP/FTP) strictly separate
 import { z } from 'zod';
 import { validateSafeUrl, isPrivateOrLocalHost } from '../utils/urlValidator.js';
 
-// checking connection details so unsafe URLs or private IPs are blocked
+// Validate connection details so local files, SSRF, and private IPs are blocked
 const connectionConfigSchemaBase = z.record(z.any()).superRefine((config, ctx) => {
   if (config.url !== undefined) {
     try {
-      // this will make sure its safe: blocking local files and private IPs
       validateSafeUrl(config.url);
     } catch (err) {
       ctx.addIssue({
@@ -28,12 +27,12 @@ const connectionConfigSchemaBase = z.record(z.any()).superRefine((config, ctx) =
   }
 });
 
-// schema for creating a brand new supplier source
+// Schema for registering a new supplier data source
 export const sourceCreateSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  // this is the data format: csv, xml, or api
+  // Data format: csv, xml, or api
   type: z.enum(['csv', 'xml', 'api']),
-  // this is the transport protocol: HTTP or FTP
+  // Transport protocol: HTTP or FTP
   protocol: z
     .enum(['HTTP', 'FTP', 'HTTPS', 'SFTP', 'http', 'ftp', 'https', 'sftp'])
     .default('HTTP')
@@ -41,10 +40,10 @@ export const sourceCreateSchema = z.object({
   default_model_id: z.string().default('google/gemini-flash-1.5'),
   connection_config: connectionConfigSchemaBase.default({}),
   dialect_config: z.record(z.any()).default({}),
-  schedule_cron: z.string().nullable().optional(),
+  schedule_cron: z.string().nullable().optional()
 });
 
-// schema for updating an existing source without wiping fields with defaults
+// Partial schema for updating an existing source without overwriting untouched fields
 export const sourceUpdateSchema = z.object({
   name: z.string().min(1, 'Name is required').optional(),
   type: z.enum(['csv', 'xml', 'api']).optional(),
@@ -56,5 +55,5 @@ export const sourceUpdateSchema = z.object({
   connection_config: connectionConfigSchemaBase.optional(),
   dialect_config: z.record(z.any()).optional(),
   schedule_cron: z.string().nullable().optional(),
-  status: z.enum(['ACTIVE', 'PAUSED', 'ARCHIVED']).optional(),
+  status: z.enum(['ACTIVE', 'PAUSED', 'ARCHIVED']).optional()
 });
