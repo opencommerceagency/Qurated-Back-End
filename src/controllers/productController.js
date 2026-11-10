@@ -193,9 +193,9 @@ export async function getProductById(req, res) {
  * PUT /api/products/:id/attributes
  * Manually overrides product attributes within a single atomic PostgreSQL transaction:
  * - Validates provided attributes using dynamically compiled Zod schema from model snapshot
- * - Updates or inserts extracted_attributes with confidence_score=100 and audit metadata
+ * - Updates or inserts extracted_attributes with confidence_score=100 and audit metadata, clearing stale AI provenance
  * - Deletes resolved gaps from product_gaps
- * - Evaluates remaining gaps: promotes to ENRICHED if 0 gaps remain, else stays in NEEDS_REVIEW
+ * - Evaluates remaining gaps & checks required schema attributes: promotes to ENRICHED only if 0 gaps, all required filled, and valid prior state
  */
 export async function updateProductAttributes(req, res) {
   const client = await pool.connect();
@@ -261,15 +261,19 @@ export async function updateProductAttributes(req, res) {
     const overriddenBy = req.userId || req.headers['x-user-id'] || 'operator';
 
     // 3. Update or insert extracted_attributes and delete resolved gaps
+    // Clear old AI raw_source_value and bounding boxes so stale provenance is not shown next to human edits
     for (const [attrKey, attrVal] of Object.entries(validatedAttributes)) {
       const jsonVal = JSON.stringify(attrVal);
 
       await client.query(
         `INSERT INTO extracted_attributes (
            product_id, attribute_key, value, confidence_score,
-           is_manually_overridden, overridden_by, overridden_at, updated_at
+           is_manually_overridden, overridden_by, overridden_at,
+           raw_source_value, bounding_box, page_number,
+           source_file_id, source_row_index, source_column,
+           updated_at
          )
-         VALUES ($1, $2, $3, 100, true, $4, NOW(), NOW())
+         VALUES ($1, $2, $3, 100, true, $4, NOW(), NULL, NULL, NULL, NULL, NULL, NULL, NOW())
          ON CONFLICT (product_id, attribute_key)
          DO UPDATE SET
            value = EXCLUDED.value,
@@ -277,6 +281,12 @@ export async function updateProductAttributes(req, res) {
            is_manually_overridden = true,
            overridden_by = EXCLUDED.overridden_by,
            overridden_at = EXCLUDED.overridden_at,
+           raw_source_value = NULL,
+           bounding_box = NULL,
+           page_number = NULL,
+           source_file_id = NULL,
+           source_row_index = NULL,
+           source_column = NULL,
            updated_at = NOW()`,
         [id, attrKey, jsonVal, overriddenBy]
       );
@@ -295,8 +305,48 @@ export async function updateProductAttributes(req, res) {
     );
     const remainingGapsCount = remainingGapsRes.rows[0].count;
 
-    // If all gaps resolved -> ENRICHED, else stay in NEEDS_REVIEW
-    const targetState = remainingGapsCount === 0 ? 'ENRICHED' : 'NEEDS_REVIEW';
+    // Stop blind promotions: strictly verify that ALL required schema attributes are actually filled
+    // If any required attribute is missing, or if the product was in FAILED_EXTRACTION or PROCESSING, keep it in NEEDS_REVIEW.
+    const modelAttributes = Array.isArray(snapshot)
+      ? snapshot
+      : Array.isArray(snapshot?.attributes)
+        ? snapshot.attributes
+        : [];
+    const requiredAttributes = modelAttributes.filter(
+      (attr) => attr.is_required === true || attr.is_required === 'true'
+    );
+
+    // Fetch all current attributes for this product from DB
+    const currentAttrsRes = await client.query(
+      'SELECT attribute_key, value FROM extracted_attributes WHERE product_id = $1',
+      [id]
+    );
+    const currentAttrMap = new Map();
+    for (const row of currentAttrsRes.rows) {
+      let val = row.value;
+      if (typeof val === 'string') {
+        try {
+          val = JSON.parse(val);
+        } catch {}
+      }
+      currentAttrMap.set(row.attribute_key, val);
+    }
+
+    const allRequiredFilled = requiredAttributes.every((attr) => {
+      const key = attr.key || (attr.name ? attr.name.toLowerCase().replace(/[^a-z0-9_]/g, '_') : null);
+      if (!key) return true;
+      const val = currentAttrMap.get(key);
+      if (val === undefined || val === null) return false;
+      if (typeof val === 'string' && val.trim() === '') return false;
+      return true;
+    });
+
+    const isIllegalPriorState = product.state === 'FAILED_EXTRACTION' || product.state === 'PROCESSING';
+
+    // Promote to ENRICHED only if 0 gaps remain, all required schema attributes exist, and not in illegal prior state
+    const targetState = (remainingGapsCount === 0 && allRequiredFilled && !isIllegalPriorState)
+      ? 'ENRICHED'
+      : 'NEEDS_REVIEW';
 
     await client.query(
       `UPDATE extracted_products
@@ -327,4 +377,3 @@ export default {
   getProductById,
   updateProductAttributes
 };
-
