@@ -200,6 +200,7 @@ export function compileAttributesOverrideSchema(snapshot, attributeKeys = []) {
       case 'integer':
       case 'number':
         shape[key] = z.preprocess((val) => {
+          if (val === null || val === undefined) return val;
           if (typeof val === 'boolean') return NaN;
           if (typeof val === 'string') {
             if (!/^-?\d+$/.test(val.trim())) return NaN;
@@ -228,13 +229,22 @@ export function compileAttributesOverrideSchema(snapshot, attributeKeys = []) {
           : [];
 
         if (validList.length > 0) {
-          shape[key] = z.enum(validList, {
+          const canonicalMap = new Map();
+          for (const item of validList) {
+            canonicalMap.set(item.toLowerCase(), item);
+          }
+          shape[key] = z.preprocess((val) => {
+            if (val === null || val === undefined) return val;
+            const strVal = String(val).trim();
+            const canonical = canonicalMap.get(strVal.toLowerCase());
+            return canonical !== undefined ? canonical : val;
+          }, z.enum(validList, {
             errorMap: () => ({
               message: `Value is not permitted for "${key}". Allowed values: [${validList.join(', ')}]`
             })
-          });
+          }));
         } else {
-          shape[key] = z.coerce.string();
+          shape[key] = z.string();
         }
         break;
       }
@@ -246,6 +256,11 @@ export function compileAttributesOverrideSchema(snapshot, attributeKeys = []) {
           z.string({ message: `Field "${key}" must be a string` }).min(1, { message: `Field "${key}" cannot be empty` })
         );
         break;
+    }
+
+    // Allow null if user is clearing an optional attribute
+    if (!attr.is_required && shape[key]) {
+      shape[key] = shape[key].nullable();
     }
   }
 
