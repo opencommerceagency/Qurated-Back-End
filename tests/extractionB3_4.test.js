@@ -31,6 +31,12 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
   const createdProductIds = [];
 
   before(async () => {
+    // Clean up stale records from previous test runs
+    await pool.query('DELETE FROM extracted_products WHERE merchant_id = $1 OR merchant_id = $2', [merchantA, merchantB]);
+    await pool.query('DELETE FROM extraction_jobs WHERE merchant_id = $1 OR merchant_id = $2', [merchantA, merchantB]);
+    await pool.query('DELETE FROM files WHERE merchant_id = $1 OR merchant_id = $2', [merchantA, merchantB]);
+    await pool.query('DELETE FROM product_models WHERE merchant_id = $1 OR merchant_id = $2', [merchantA, merchantB]);
+
     // 1. Setup Express server for API integration tests
     app = express();
     app.use(express.json());
@@ -152,7 +158,7 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
         model_version_id: modelVersionAId,
         productData: {
           supplier_sku: 'QUEUE-PROD-001',
-          weight: { value: 500, confidence_score: 95 }
+          weight: { value: 500, raw_source_value: '500g' }
         },
         computeGaps: true,
         schemaSnapshot
@@ -167,9 +173,9 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
         model_version_id: modelVersionAId,
         productData: {
           supplier_sku: 'QUEUE-PROD-002',
-          material: { value: 'Grade 304 Stainless', confidence_score: 95 },
-          weight: { value: 800, confidence_score: 50 },
-          finish: { value: 'chrome', confidence_score: 95 } // not in allowed_values
+          material: { value: 'Grade 304 Stainless', raw_source_value: 'Grade 304 Stainless' },
+          weight: { value: 800, raw_source_value: 'estimated weight' },
+          finish: { value: 'chrome', raw_source_value: 'chrome' } // not in allowed_values
         },
         computeGaps: true,
         schemaSnapshot
@@ -184,9 +190,9 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
         model_version_id: modelVersionAId,
         productData: {
           supplier_sku: 'QUEUE-PROD-003',
-          material: { value: 'Structural Steel', confidence_score: 95 },
-          weight: { value: 1200, confidence_score: 90 },
-          finish: { value: 'zinc', confidence_score: 100 }
+          material: { value: 'Structural Steel', raw_source_value: 'Structural Steel' },
+          weight: { value: 1200, raw_source_value: '1200g' },
+          finish: { value: 'zinc', raw_source_value: 'zinc' }
         },
         computeGaps: true,
         schemaSnapshot
@@ -360,10 +366,10 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
             value: 'Stainless Steel A2',
             confidence_score: 95,
             page_number: 4,
-            bounding_box: { x: 0.1, y: 0.2, w: 0.5, h: 0.1 },
+            bounding_box: { x: 0.1, y: 0.2, width: 0.5, height: 0.1 },
             raw_source_value: 'Material: Stainless Steel A2'
           },
-          weight: { value: 650, confidence_score: 50 } // Low confidence gap
+          weight: { value: 650, raw_source_value: 'approximate weight' } // Low confidence gap
         },
         computeGaps: true,
         schemaSnapshot
@@ -402,7 +408,7 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
       assert.strictEqual(matAttr.value, 'Stainless Steel A2');
       assert.strictEqual(matAttr.confidence_score, 95);
       assert.strictEqual(matAttr.page_number, 4);
-      assert.deepStrictEqual(matAttr.bounding_box, { x: 0.1, y: 0.2, w: 0.5, h: 0.1 });
+      assert.deepStrictEqual(matAttr.bounding_box, { x: 0.1, y: 0.2, width: 0.5, height: 0.1 });
       assert.strictEqual(matAttr.raw_source_value, 'Material: Stainless Steel A2');
       assert.strictEqual(matAttr.is_manually_overridden, false);
       assert.strictEqual(matAttr.overridden_by, null);
@@ -449,7 +455,7 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
         productData: {
           supplier_sku: `OVERRIDE-SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           // material omitted -> missing_required
-          weight: { value: 900, confidence_score: 50 } // low_confidence
+          weight: { value: 900, raw_source_value: 'estimated weight' } // low_confidence
         },
         computeGaps: true,
         schemaSnapshot
@@ -532,7 +538,7 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
       assert.strictEqual(body.state, 'NEEDS_REVIEW');
       assert.strictEqual(body.remaining_gaps_count, 1); // material gap still remains
 
-      // 1. Verify extracted_attributes audit logging
+      // 1. Verify extracted_attributes audit logging and cleared AI provenance
       const attrRes = await pool.query(
         'SELECT * FROM extracted_attributes WHERE product_id = $1 AND attribute_key = $2',
         [overrideProdId, 'weight']
@@ -544,6 +550,8 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
       assert.strictEqual(weightAttr.is_manually_overridden, true);
       assert.strictEqual(weightAttr.overridden_by, operatorUser);
       assert.ok(weightAttr.overridden_at !== null);
+      assert.strictEqual(weightAttr.raw_source_value, null);
+      assert.strictEqual(weightAttr.bounding_box, null);
 
       // 2. Verify product_gaps for weight was deleted, while material gap remains
       const gapsRes = await pool.query(
@@ -605,6 +613,8 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
       assert.strictEqual(matRes.rows[0].confidence_score, 100);
       assert.strictEqual(matRes.rows[0].is_manually_overridden, true);
       assert.strictEqual(matRes.rows[0].overridden_by, operatorUser);
+      assert.strictEqual(matRes.rows[0].raw_source_value, null);
+      assert.strictEqual(matRes.rows[0].bounding_box, null);
 
       // 2. Verify all product_gaps are cleared
       const gapCheck = await pool.query('SELECT COUNT(*)::int AS count FROM product_gaps WHERE product_id = $1', [overrideProdId]);
@@ -641,6 +651,249 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
       const prodCheck = await pool.query('SELECT state FROM extracted_products WHERE id = $1', [overrideProdId]);
       assert.strictEqual(prodCheck.rows[0].state, 'ENRICHED');
     });
+
+    it('Manual override clears old raw_source_value and bounding_box so stale AI provenance is not shown', async () => {
+      // 1. Seed a product with an attribute containing AI lineage
+      const sku = `PROV-TEST-${Date.now()}`;
+      const p = await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku,
+          material: {
+            value: 'Initial Material',
+            raw_source_value: 'Snippet from page 12',
+            bounding_box: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
+            page_number: 12
+          }
+        },
+        computeGaps: false,
+        schemaSnapshot
+      });
+      createdProductIds.push(p.productId);
+
+      // Verify AI provenance is initially present
+      const preCheck = await pool.query(
+        'SELECT raw_source_value, bounding_box FROM extracted_attributes WHERE product_id = $1 AND attribute_key = $2',
+        [p.productId, 'material']
+      );
+      assert.strictEqual(preCheck.rows[0].raw_source_value, 'Snippet from page 12');
+      assert.ok(preCheck.rows[0].bounding_box !== null);
+
+      // 2. Perform manual override on this attribute
+      const res = await fetch(`${baseUrl}/${p.productId}/attributes`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA,
+          'x-user-id': 'qa_specialist'
+        },
+        body: JSON.stringify({
+          attributes: {
+            material: 'Human Verified Stainless'
+          }
+        })
+      });
+      assert.strictEqual(res.status, 200);
+
+      // 3. Verify AI provenance was completely wiped for this attribute
+      const postCheck = await pool.query(
+        'SELECT raw_source_value, bounding_box, page_number, is_manually_overridden, overridden_by FROM extracted_attributes WHERE product_id = $1 AND attribute_key = $2',
+        [p.productId, 'material']
+      );
+      assert.strictEqual(postCheck.rows[0].raw_source_value, null);
+      assert.strictEqual(postCheck.rows[0].bounding_box, null);
+      assert.strictEqual(postCheck.rows[0].page_number, null);
+      assert.strictEqual(postCheck.rows[0].is_manually_overridden, true);
+      assert.strictEqual(postCheck.rows[0].overridden_by, 'qa_specialist');
+    });
+
+    it('Stop blind promotion: product in FAILED_EXTRACTION or PROCESSING is NOT promoted to ENRICHED upon override', async () => {
+      // 1. Create a product in FAILED_EXTRACTION
+      const sku = `FAILED-PROD-${Date.now()}`;
+      const p = await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku,
+          material: { value: 'Grade A Steel', raw_source_value: 'Grade A Steel' }
+        },
+        computeGaps: false,
+        schemaSnapshot
+      });
+      createdProductIds.push(p.productId);
+
+      await pool.query("UPDATE extracted_products SET state = 'FAILED_EXTRACTION' WHERE id = $1", [p.productId]);
+
+      // 2. Override attributes resolving all possible gaps
+      const res = await fetch(`${baseUrl}/${p.productId}/attributes`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA,
+          'x-user-id': 'recovery_agent'
+        },
+        body: JSON.stringify({
+          attributes: {
+            material: 'Grade A Steel Verified',
+            weight: 500
+          }
+        })
+      });
+
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      // Must transition to NEEDS_REVIEW, not jump directly to ENRICHED
+      assert.strictEqual(body.state, 'NEEDS_REVIEW');
+
+      const dbCheck = await pool.query('SELECT state FROM extracted_products WHERE id = $1', [p.productId]);
+      assert.strictEqual(dbCheck.rows[0].state, 'NEEDS_REVIEW');
+    });
+
+    it('Stop blind promotion: product missing required schema attributes is NOT promoted to ENRICHED even if 0 gaps', async () => {
+      // 1. Create a product that has NO gaps in product_gaps table, but lacks required 'material' attribute
+      const sku = `NO-GAPS-INCOMPLETE-${Date.now()}`;
+      const p = await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku
+          // material omitted!
+        },
+        computeGaps: false,
+        schemaSnapshot
+      });
+      createdProductIds.push(p.productId);
+
+      // Force 0 gaps in product_gaps table
+      await pool.query('DELETE FROM product_gaps WHERE product_id = $1', [p.productId]);
+
+      // 2. Override an optional attribute ('weight')
+      const res = await fetch(`${baseUrl}/${p.productId}/attributes`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': validApiKey,
+          'x-merchant-id': merchantA,
+          'x-user-id': 'operator'
+        },
+        body: JSON.stringify({
+          attributes: {
+            weight: 750
+          }
+        })
+      });
+
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      // Even though remaining_gaps_count is 0, missing required 'material' keeps it in NEEDS_REVIEW
+      assert.strictEqual(body.state, 'NEEDS_REVIEW');
+
+      const dbCheck = await pool.query('SELECT state FROM extracted_products WHERE id = $1', [p.productId]);
+      assert.strictEqual(dbCheck.rows[0].state, 'NEEDS_REVIEW');
+    });
+
+    it('Re-extraction respects is_manually_overridden and does not overwrite human edits with new AI data', async () => {
+      const sku = `RE-EXTRACT-HUMAN-${Date.now()}`;
+
+      // 1. Initial product ingestion
+      const p = await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku,
+          material: { value: 'Original AI Material', raw_source_value: 'Original AI Material' }
+        },
+        computeGaps: true,
+        schemaSnapshot
+      });
+      createdProductIds.push(p.productId);
+
+      // 2. Human operator manually overrides the material
+      await pool.query(
+        `UPDATE extracted_attributes
+         SET value = $1, is_manually_overridden = true, overridden_by = 'human_specialist', overridden_at = NOW()
+         WHERE product_id = $2 AND attribute_key = 'material'`,
+        [JSON.stringify('Curated Stainless Steel'), p.productId]
+      );
+
+      // 3. Subsequent automated re-extraction pass with new AI data for 'material'
+      await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku,
+          material: { value: 'New AI Overwrite Attempt', raw_source_value: 'New AI Overwrite Attempt' },
+          weight: { value: 600, raw_source_value: '600g' }
+        },
+        computeGaps: false,
+        schemaSnapshot
+      });
+
+      // 4. Verify human override was preserved and NOT overwritten
+      const checkRes = await pool.query(
+        'SELECT value, is_manually_overridden, overridden_by FROM extracted_attributes WHERE product_id = $1 AND attribute_key = $2',
+        [p.productId, 'material']
+      );
+      assert.strictEqual(checkRes.rows[0].value, 'Curated Stainless Steel');
+      assert.strictEqual(checkRes.rows[0].is_manually_overridden, true);
+      assert.strictEqual(checkRes.rows[0].overridden_by, 'human_specialist');
+    });
+
+    it('Re-extraction attribute pruning does not delete human-curated attributes when omitted from new AI extraction', async () => {
+      const sku = `PRUNING-HUMAN-${Date.now()}`;
+
+      // 1. Initial product ingestion with material
+      const p = await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku,
+          material: { value: 'Initial Material', raw_source_value: 'Initial Material' }
+        },
+        computeGaps: false,
+        schemaSnapshot
+      });
+      createdProductIds.push(p.productId);
+
+      // 2. Mark material as human overridden
+      await pool.query(
+        `UPDATE extracted_attributes
+         SET is_manually_overridden = true, overridden_by = 'human_editor', overridden_at = NOW()
+         WHERE product_id = $1 AND attribute_key = 'material'`,
+        [p.productId]
+      );
+
+      // 3. New re-extraction pass that OMITTED 'material' entirely (only extracted 'weight')
+      await ingestExtractedProduct({
+        merchant_id: merchantA,
+        job_id: jobAId,
+        model_version_id: modelVersionAId,
+        productData: {
+          supplier_sku: sku,
+          weight: { value: 300, raw_source_value: '300g' }
+        },
+        computeGaps: false,
+        schemaSnapshot
+      });
+
+      // 4. Verify material attribute was NOT pruned
+      const checkRes = await pool.query(
+        'SELECT value, is_manually_overridden FROM extracted_attributes WHERE product_id = $1 AND attribute_key = $2',
+        [p.productId, 'material']
+      );
+      assert.strictEqual(checkRes.rows.length, 1);
+      assert.strictEqual(checkRes.rows[0].value, 'Initial Material');
+      assert.strictEqual(checkRes.rows[0].is_manually_overridden, true);
+    });
   });
 
   // =========================================================================
@@ -656,7 +909,7 @@ describe('User Story B3.4: Manual Enrichment & Gap Resolution', () => {
         model_version_id: modelVersionAId,
         productData: {
           supplier_sku: 'CROSS-TENANT-TARGET-SKU',
-          material: { value: 'Brass', confidence_score: 95 }
+          material: { value: 'Brass', raw_source_value: 'Brass' }
         },
         computeGaps: true,
         schemaSnapshot

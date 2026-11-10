@@ -266,7 +266,8 @@ export async function ingestExtractedProduct(
            page_number = EXCLUDED.page_number,
            bounding_box = EXCLUDED.bounding_box,
            raw_source_value = EXCLUDED.raw_source_value,
-           updated_at = NOW()`,
+           updated_at = NOW()
+         WHERE extracted_attributes.is_manually_overridden = false`,
         [
           productId,
           attrKey,
@@ -286,12 +287,16 @@ export async function ingestExtractedProduct(
     if (attributeKeys.length > 0) {
       await dbClient.query(
         `DELETE FROM extracted_attributes
-         WHERE product_id = $1 AND NOT (attribute_key = ANY($2::text[]))`,
+         WHERE product_id = $1
+           AND is_manually_overridden = false
+           AND NOT (attribute_key = ANY($2::text[]))`,
         [productId, attributeKeys]
       );
     } else {
       await dbClient.query(
-        'DELETE FROM extracted_attributes WHERE product_id = $1',
+        `DELETE FROM extracted_attributes
+         WHERE product_id = $1
+           AND is_manually_overridden = false`,
         [productId]
       );
     }
