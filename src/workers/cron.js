@@ -1,6 +1,7 @@
 import { pool } from '../db/index.js';
 import { streamHvhXml } from '../adapters/hvhAdapter.js';
 import { ingestCsvStream } from '../services/csvParser.js';
+import { ingestXlsxStream } from '../services/xlsxParser.js';
 import { fetchSourceStream } from '../adapters/fetcherFactory.js';
 import parser from 'cron-parser';
 
@@ -92,7 +93,13 @@ export function startCronWorker() {
                             const stream = await fetchSourceStream(source, runId);
 
                             // Use the correct parser based on source type
-                            if (source.type && source.type.toLowerCase() === 'csv') {
+                            const sourceType = (source.type || '').toLowerCase();
+                            if (sourceType === 'xlsx' || sourceType === 'excel') {
+                                const stats = await ingestXlsxStream(stream, source, source.merchant_id, runId);
+                                totalRows = stats.totalRows;
+                                validRows = stats.validRows;
+                                failedRows = stats.failedRows;
+                            } else if (sourceType === 'csv') {
                                 const stats = await ingestCsvStream(stream, source, source.merchant_id, runId);
                                 totalRows = stats.totalRows;
                                 validRows = stats.validRows;

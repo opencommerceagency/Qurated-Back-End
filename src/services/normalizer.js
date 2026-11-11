@@ -1,17 +1,57 @@
 /**
- * Normalization Rules & Edge Case Validation for Ingestion (Milestone B1.3-T3)
+ * Normalization Rules & Edge Case Validation for Ingestion (Milestone B1.3-T3 & B4.1)
  * 
  * Provides:
  * 1. SKU validation (detects missing or whitespace-only SKUs)
  * 2. Modulo-10 checksum verification for EAN-13 and UPC-12 barcodes
- * 3. European & US price parsing (currency symbols, comma/dot decimals)
- * 4. Embedded unit extraction (composite measurement strings like "1300 gram", "2.5 kg")
- * 5. Full row evaluation returning { isValid, reasons, normalized }
+ * 3. Schema Pre-processor: Auto-padding 12-digit EANs to 13 digits (Puchshop edge cases)
+ * 4. European & US price parsing (currency symbols, comma/dot decimals)
+ * 5. Embedded unit extraction (composite measurement strings like "1300 gram", "2.5 kg")
+ * 6. Full row evaluation returning { isValid, reasons, normalized }
  */
 
 /**
+ * Automatically pads 12-digit barcodes (UPC-12 or shortened EAN-13 missing a leading zero)
+ * to 13 digits with a leading zero to handle supplier edge cases (such as Puchshop).
+ * 
+ * @param {string|number} ean - The raw barcode / EAN / UPC value
+ * @returns {string|null} - 13-digit EAN string, or original trimmed string if not 12 digits
+ */
+export function padEan(ean) {
+  if (ean === null || ean === undefined) return null;
+  const str = String(ean).trim();
+  if (!str) return null;
+
+  const clean = str.replace(/[-\s]/g, '');
+  if (!/^\d+$/.test(clean)) return clean;
+
+  if (clean.length === 12) {
+    return '0' + clean;
+  }
+
+  return clean;
+}
+
+/**
+ * Schema Pre-processor helper for Zod schemas or attribute pipelines.
+ * Coerces numbers/strings and automatically pads 12-digit barcodes to 13 digits.
+ * 
+ * @param {unknown} val - Incoming raw value
+ * @returns {unknown} - Pre-processed value
+ */
+export function eanPreProcessor(val) {
+  if (val === null || val === undefined || val === '') return val;
+  const str = typeof val === 'number' ? String(val) : String(val).trim();
+  const clean = str.replace(/[-\s]/g, '');
+  if (/^\d{12}$/.test(clean)) {
+    return '0' + clean;
+  }
+  return str;
+}
+
+/**
  * Validates an EAN-13 or UPC-12 barcode using modulo-10 checksum validation.
- * Automatically pads 12-digit UPCs with a leading zero to conform to EAN-13.
+ * Automatically pads 12-digit UPCs/EANs with a leading zero to conform to EAN-13.
  * 
  * @param {string|number} ean - The raw barcode / EAN / UPC value
  * @returns {boolean} - True if valid modulo-10 checksum, false otherwise
@@ -183,11 +223,11 @@ export function extractUnit(text) {
 /**
  * Evaluates a single record row against all normalization rules:
  * - SKU exists and is non-empty after trimming (else: 'MISSING_SKU')
- * - Barcode/EAN checksum valid if present (else: 'INVALID_EAN_CHECKSUM')
+ * - Barcode/EAN checksum valid if present, auto-padded to 13 digits (else: 'INVALID_EAN_CHECKSUM')
  * - Price format parseable and non-negative (else: 'INVALID_PRICE')
  * - Composite unit string extracted if present
  * 
- * @param {Object} row - Raw CSV record object
+ * @param {Object} row - Raw CSV/XLSX record object
  * @returns {{ isValid: boolean, reasons: string[], normalized: Object|null }}
  */
 export function normalizeRow(row) {
@@ -210,15 +250,15 @@ export function normalizeRow(row) {
     sku = String(rawSku).trim();
   }
 
-  // 2. Barcode / EAN Checksum Verification
+  // 2. Barcode / EAN Checksum Verification & Pre-processing (Pad 12-digit to 13-digit)
   const rawEan = row.ean ?? row.barcode ?? row.upc ?? row.gtin;
   let ean = null;
   if (rawEan !== undefined && rawEan !== null && String(rawEan).trim() !== '') {
-    const trimmedEan = String(rawEan).trim();
-    if (!isValidEan(trimmedEan)) {
+    const paddedEan = padEan(rawEan);
+    if (!isValidEan(paddedEan)) {
       reasons.push('INVALID_EAN_CHECKSUM');
     } else {
-      ean = trimmedEan.replace(/\D/g, '');
+      ean = paddedEan;
     }
   }
 
@@ -286,3 +326,12 @@ export function normalizeRow(row) {
     } : null
   };
 }
+
+export default {
+  padEan,
+  eanPreProcessor,
+  isValidEan,
+  normalizePrice,
+  extractUnit,
+  normalizeRow
+};
