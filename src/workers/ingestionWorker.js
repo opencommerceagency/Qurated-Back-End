@@ -1,11 +1,12 @@
 import { ingestCsvStream } from '../services/csvParser.js';
 import { ingestXlsxStream, parseXlsxBuffer } from '../services/xlsxParser.js';
+import { ingestXmlStream, parseXmlStream } from '../services/xmlParser.js';
 import { detectFileType } from '../utils/fileValidator.js';
 
 /**
  * Ingestion Worker & Parser Dispatcher (Milestone B4.1)
  *
- * Routes incoming streams to appropriate format parsers (CSV, XLSX)
+ * Routes incoming streams to appropriate format parsers (CSV, XLSX, XML)
  * with unified error handling, metric consistency, and database tracking.
  */
 
@@ -25,6 +26,10 @@ export async function ingestSourceStream(stream, source, merchantId, runId) {
     return ingestXlsxStream(stream, source, merchantId, runId);
   }
 
+  if (type === 'xml') {
+    return ingestXmlStream(stream, source, merchantId, runId);
+  }
+
   if (type === 'csv') {
     return ingestCsvStream(stream, source, merchantId, runId);
   }
@@ -34,6 +39,9 @@ export async function ingestSourceStream(stream, source, merchantId, runId) {
   if (detected === 'xlsx') {
     return ingestXlsxStream(stream, source, merchantId, runId);
   }
+  if (detected === 'xml') {
+    return ingestXmlStream(stream, source, merchantId, runId);
+  }
 
   // Default to CSV
   return ingestCsvStream(stream, source, merchantId, runId);
@@ -42,6 +50,8 @@ export async function ingestSourceStream(stream, source, merchantId, runId) {
 export {
   ingestXlsxStream,
   parseXlsxBuffer,
+  ingestXmlStream,
+  parseXmlStream,
   ingestCsvStream
 };
 
@@ -49,6 +59,7 @@ export default {
   ingestSourceStream,
   ingestXlsxStream,
   parseXlsxBuffer,
+  ingestXmlStream,
+  parseXmlStream,
   ingestCsvStream
 };
-

@@ -1,6 +1,7 @@
 import XLSX from 'xlsx';
 import { pool } from '../db/index.js';
 import { normalizeRow } from './normalizer.js';
+import { ensureProvenanceColumns } from '../db/ingestionHelpers.js';
 
 /**
  * XLSX Ingestion & Parser Service (Milestone B4.1)
@@ -8,6 +9,9 @@ import { normalizeRow } from './normalizer.js';
  * Configured to read all spreadsheet cells strictly as formatted strings (raw: false)
  * to prevent Excel from coercing values, stripping leading zeros from SKUs, postal codes,
  * or truncated EAN barcodes.
+ *
+ * Provenance Mapping:
+ * Maps the Excel worksheet name directly to the `page_number` column in `normalized_records`.
  */
 
 /**
@@ -34,7 +38,7 @@ export async function streamToBuffer(stream) {
  * @param {Buffer|ArrayBuffer} buffer - Raw file buffer
  * @param {Object} [options]
  * @param {string} [options.sheet] - Name of specific sheet to parse (defaults to first sheet)
- * @returns {Array<Object>} - Array of row objects with string values
+ * @returns {Array<Object>} - Array of row objects with string values (with `.sheetName` attached)
  */
 export function parseXlsxBuffer(buffer, options = {}) {
   // CRITICAL: raw: false instructs SheetJS to format all values as strings
@@ -47,7 +51,9 @@ export function parseXlsxBuffer(buffer, options = {}) {
 
   const sheetNames = workbook.SheetNames || [];
   if (sheetNames.length === 0) {
-    return [];
+    const empty = [];
+    empty.sheetName = null;
+    return empty;
   }
 
   const targetSheetName = options.sheet && workbook.Sheets[options.sheet]
@@ -56,7 +62,9 @@ export function parseXlsxBuffer(buffer, options = {}) {
 
   const worksheet = workbook.Sheets[targetSheetName];
   if (!worksheet) {
-    return [];
+    const empty = [];
+    empty.sheetName = targetSheetName;
+    return empty;
   }
 
   // raw: false ensures cell values are not converted to JS numbers
@@ -67,7 +75,7 @@ export function parseXlsxBuffer(buffer, options = {}) {
   });
 
   // Clean keys and ensure all values are string-trimmed
-  return rawRows.map((row) => {
+  const rows = rawRows.map((row) => {
     const cleaned = {};
     for (const [key, val] of Object.entries(row)) {
       const cleanKey = typeof key === 'string' ? key.trim() : key;
@@ -75,11 +83,14 @@ export function parseXlsxBuffer(buffer, options = {}) {
     }
     return cleaned;
   });
+
+  rows.sheetName = targetSheetName;
+  return rows;
 }
 
 /**
  * Ingests an XLSX stream or buffer, normalizes each row, triages invalid rows,
- * and executes chunked batch inserts (500 rows at a time).
+ * maps sheet provenance to `page_number`, and executes chunked batch inserts (500 rows at a time).
  *
  * Enforces strict metric consistency in `ingestion_runs`:
  * - total_rows === valid_rows + failed_rows
@@ -104,6 +115,9 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
     ? (source.id || source.source_id || null)
     : (typeof source === 'string' ? source : null);
 
+  // Ensure provenance columns exist in normalized_records
+  await ensureProvenanceColumns();
+
   // 1. Ensure ingestion_runs record exists and is in 'PROCESSING' state
   if (!runId) {
     const runRes = await pool.query(
@@ -124,7 +138,9 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
   let failedRowsCount = 0;
   let rowIndex = 0;
 
-  // Chunked batch flush for valid normalized records
+  let resolvedSheet = 'Sheet1';
+
+  // Chunked batch flush for valid normalized records (including page_number provenance)
   const flushCleanBatch = async () => {
     if (cleanBatch.length === 0) return;
     const batch = [...cleanBatch];
@@ -136,7 +152,7 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
 
     for (const rec of batch) {
       placeholders.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`
       );
       values.push(
         runId,
@@ -148,13 +164,14 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
         rec.ean,
         rec.unit_value,
         rec.unit_type,
-        JSON.stringify(rec.raw_data)
+        JSON.stringify(rec.raw_data),
+        rec.page_number || resolvedSheet
       );
     }
 
     const query = `
       INSERT INTO normalized_records (
-        run_id, merchant_id, sku, name, price, currency, ean, unit_value, unit_type, raw_data
+        run_id, merchant_id, sku, name, price, currency, ean, unit_value, unit_type, raw_data, page_number
       ) VALUES ${placeholders.join(', ')}
     `;
     await pool.query(query, values);
@@ -195,6 +212,7 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
     const buffer = await streamToBuffer(streamOrBuffer);
     const targetSheet = dialect.sheet || config.sheet || null;
     const rows = parseXlsxBuffer(buffer, { sheet: targetSheet });
+    resolvedSheet = rows.sheetName || targetSheet || 'Sheet1';
 
     for (const row of rows) {
       // Skip empty or blank lines
@@ -213,7 +231,10 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
 
       if (result.isValid) {
         validRowsCount++;
-        cleanBatch.push(result.normalized);
+        cleanBatch.push({
+          ...result.normalized,
+          page_number: resolvedSheet
+        });
       } else {
         failedRowsCount++;
         flaggedBatch.push({
@@ -285,4 +306,3 @@ export default {
   parseXlsxBuffer,
   ingestXlsxStream
 };
-

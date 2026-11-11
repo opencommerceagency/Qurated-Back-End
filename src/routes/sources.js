@@ -5,6 +5,7 @@ import { sourceCreateSchema, sourceUpdateSchema } from '../schemas/sourceSchema.
 import { streamHvhXml } from '../adapters/hvhAdapter.js';
 import { ingestCsvStream } from '../services/csvParser.js';
 import { ingestXlsxStream } from '../services/xlsxParser.js';
+import { ingestXmlStream } from '../services/xmlParser.js';
 import { fetchSourceStream } from '../adapters/fetcherFactory.js';
 import { authenticateApi } from '../middleware/auth.js';
 
@@ -242,6 +243,11 @@ router.post('/:id/sync', async (req, res) => {
                 const sourceType = (source.type || '').toLowerCase();
                 if (sourceType === 'xlsx' || sourceType === 'excel') {
                     const stats = await ingestXlsxStream(stream, source, req.merchantId, runId);
+                    totalRows = stats.totalRows;
+                    validRows = stats.validRows;
+                    failedRows = stats.failedRows;
+                } else if (sourceType === 'xml') {
+                    const stats = await ingestXmlStream(stream, source, req.merchantId, runId);
                     totalRows = stats.totalRows;
                     validRows = stats.validRows;
                     failedRows = stats.failedRows;
