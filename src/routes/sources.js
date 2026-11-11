@@ -4,6 +4,7 @@ import { pool } from '../db/index.js';
 import { sourceCreateSchema, sourceUpdateSchema } from '../schemas/sourceSchema.js';
 import { streamHvhXml } from '../adapters/hvhAdapter.js';
 import { ingestCsvStream } from '../services/csvParser.js';
+import { ingestXlsxStream } from '../services/xlsxParser.js';
 import { fetchSourceStream } from '../adapters/fetcherFactory.js';
 import { authenticateApi } from '../middleware/auth.js';
 
@@ -238,7 +239,13 @@ router.post('/:id/sync', async (req, res) => {
                 const stream = await fetchSourceStream(source, runId);
 
                 // Use the correct parser based on source type
-                if (source.type && source.type.toLowerCase() === 'csv') {
+                const sourceType = (source.type || '').toLowerCase();
+                if (sourceType === 'xlsx' || sourceType === 'excel') {
+                    const stats = await ingestXlsxStream(stream, source, req.merchantId, runId);
+                    totalRows = stats.totalRows;
+                    validRows = stats.validRows;
+                    failedRows = stats.failedRows;
+                } else if (sourceType === 'csv') {
                     const stats = await ingestCsvStream(stream, source, req.merchantId, runId);
                     totalRows = stats.totalRows;
                     validRows = stats.validRows;

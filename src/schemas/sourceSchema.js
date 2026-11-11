@@ -28,11 +28,15 @@ const connectionConfigSchemaBase = z.record(z.any()).superRefine((config, ctx) =
   }
 });
 
+const supportedSourceTypes = ['csv', 'xml', 'xlsx', 'api', 'CSV', 'XML', 'XLSX', 'API'];
+
 // schema for creating a brand new supplier source
 export const sourceCreateSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  // this is the data format: csv, xml, or api
-  type: z.enum(['csv', 'xml', 'api']),
+  // this is the data format: csv, xml, xlsx, or api
+  type: z
+    .enum(supportedSourceTypes)
+    .transform((t) => t.toLowerCase()),
   // this is the transport protocol: HTTP or FTP
   protocol: z
     .enum(['HTTP', 'FTP', 'HTTPS', 'SFTP', 'http', 'ftp', 'https', 'sftp'])
@@ -47,7 +51,10 @@ export const sourceCreateSchema = z.object({
 // schema for updating an existing source without wiping fields with defaults
 export const sourceUpdateSchema = z.object({
   name: z.string().min(1, 'Name is required').optional(),
-  type: z.enum(['csv', 'xml', 'api']).optional(),
+  type: z
+    .enum(supportedSourceTypes)
+    .transform((t) => t.toLowerCase())
+    .optional(),
   protocol: z
     .enum(['HTTP', 'FTP', 'HTTPS', 'SFTP', 'http', 'ftp', 'https', 'sftp'])
     .transform((p) => p.toUpperCase())

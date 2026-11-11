@@ -30,6 +30,7 @@
     "pg": "^8.23.0",
     "sax": "^1.6.1",
     "swagger-ui-express": "^5.0.1",
+    "xlsx": "^0.18.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {
