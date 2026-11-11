@@ -2,6 +2,7 @@ import { pool } from '../db/index.js';
 import { streamHvhXml } from '../adapters/hvhAdapter.js';
 import { ingestCsvStream } from '../services/csvParser.js';
 import { ingestXlsxStream } from '../services/xlsxParser.js';
+import { ingestXmlStream } from '../services/xmlParser.js';
 import { fetchSourceStream } from '../adapters/fetcherFactory.js';
 import parser from 'cron-parser';
 
@@ -99,13 +100,18 @@ export function startCronWorker() {
                                 totalRows = stats.totalRows;
                                 validRows = stats.validRows;
                                 failedRows = stats.failedRows;
+                            } else if (sourceType === 'xml') {
+                                const stats = await ingestXmlStream(stream, source, source.merchant_id, runId);
+                                totalRows = stats.totalRows;
+                                validRows = stats.validRows;
+                                failedRows = stats.failedRows;
                             } else if (sourceType === 'csv') {
                                 const stats = await ingestCsvStream(stream, source, source.merchant_id, runId);
                                 totalRows = stats.totalRows;
                                 validRows = stats.validRows;
                                 failedRows = stats.failedRows;
                             } else {
-                                // We pass the stream to the XML parser
+                                // Fallback legacy callback
                                 await streamHvhXml(stream, (record) => {
                                     totalRows++;
                                     if (record && !record.is_flagged) {
