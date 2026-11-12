@@ -587,6 +587,40 @@ export const swaggerDocument = {
           409: { description: 'Conflict on illegal promotion' }
         }
       }
+    },
+    '/metrics/ai-costs': {
+      get: {
+        summary: 'Aggregate AI token usage and calculate costs per model and per attempted product',
+        tags: ['Metrics'],
+        parameters: [
+          { $ref: '#/components/parameters/MerchantIdHeader' },
+          { in: 'query', name: 'job_id', schema: { type: 'string', format: 'uuid' }, description: 'Filter costs by extraction job UUID' },
+          { in: 'query', name: 'from', schema: { type: 'string', format: 'date-time' }, description: 'Start date-time filter' },
+          { in: 'query', name: 'to', schema: { type: 'string', format: 'date-time' }, description: 'End date-time filter' }
+        ],
+        responses: {
+          200: {
+            description: 'Aggregated AI token usage, costs, and cost per product',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    total_cost: { type: 'number' },
+                    total_prompt_tokens: { type: 'integer' },
+                    total_completion_tokens: { type: 'integer' },
+                    total_products_attempted: { type: 'integer' },
+                    cost_per_product: { type: 'number' },
+                    breakdown_by_model: { type: 'array', items: { type: 'object' } }
+                  }
+                }
+              }
+            }
+          },
+          400: { description: 'Invalid query parameters or merchant ID' },
+          404: { description: 'Job not found' }
+        }
+      }
     }
   },
 };

@@ -10,6 +10,7 @@ import sourceRoutes from './src/routes/sources.js';
 import modelRoutes from './src/routes/models.js';
 import extractionRoutes from './src/routes/extraction.js';
 import productRoutes from './src/routes/products.js';
+import metricsRoutes from './src/routes/metrics.js';
 import { startCronWorker } from './src/workers/cron.js';
 import { startExtractionWorker } from './src/workers/extractionWorker.js';
 import swaggerUi from 'swagger-ui-express';
@@ -46,6 +47,7 @@ app.use('/api/sources', sourceRoutes);
 app.use('/api/models', modelRoutes);
 app.use('/api/extraction', extractionRoutes);
 app.use('/api/products', productRoutes);
+app.use('/api/metrics', metricsRoutes);
 
 app.get('/health', (req, res) => {
     res.json({
