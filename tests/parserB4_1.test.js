@@ -183,7 +183,7 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
   });
 
   // =========================================================================
-  // 3. XLSX Parser & Provenance Mapping (Sheet Name -> page_number)
+  // 3. XLSX Parser & Provenance Mapping (Sheet Name -> source_metadata.sheet_name)
   // =========================================================================
   describe('3. XLSX Parser & Sheet Provenance Mapping (xlsxParser.js)', () => {
     it('should read all cell values strictly as strings, preserving leading zeros', () => {
@@ -314,7 +314,7 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
       }
     });
 
-    it('XLSX Provenance: should map Excel sheet name to page_number in normalized_records', async () => {
+    it('XLSX Provenance: should map Excel sheet name to source_metadata in normalized_records', async () => {
       const testData = [
         ['sku', 'name', 'price', 'ean', 'weight'],
         ['00101', 'Puch Dellorto Carburetor 15mm', '€ 65,00', '012345678905', '450 g'], // Valid, 12-digit EAN
@@ -339,7 +339,7 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
         'Metric consistency: total_rows === valid_rows + failed_rows'
       );
 
-      // Verify records in normalized_records have page_number set to sheetName
+      // Verify records in normalized_records have source_metadata set to { sheet_name: sheetName }
       const validRecordsRes = await pool.query(
         'SELECT * FROM normalized_records WHERE run_id = $1 ORDER BY sku ASC',
         [stats.runId]
@@ -352,12 +352,14 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
       assert.strictEqual(Number(row1.price), 65);
       assert.strictEqual(row1.ean, '0012345678905');
       assert.strictEqual(row1.ean.length, 13);
-      // PROVENANCE CHECK: sheet name mapped directly to page_number
-      assert.strictEqual(row1.page_number, sheetName);
+      // PROVENANCE CHECK: sheet name mapped to source_metadata.sheet_name
+      const meta1 = typeof row1.source_metadata === 'string' ? JSON.parse(row1.source_metadata) : row1.source_metadata;
+      assert.deepStrictEqual(meta1, { sheet_name: sheetName });
 
       const row2 = validRecordsRes.rows[1];
       assert.strictEqual(row2.sku, '00102');
-      assert.strictEqual(row2.page_number, sheetName);
+      const meta2 = typeof row2.source_metadata === 'string' ? JSON.parse(row2.source_metadata) : row2.source_metadata;
+      assert.deepStrictEqual(meta2, { sheet_name: sheetName });
 
       // Verify flagged_records
       const flaggedRes = await pool.query(
@@ -375,7 +377,7 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
       assert.strictEqual(runRes.rows[0].total_rows, 4);
     });
 
-    it('XML Provenance: should map XML node path to source_column in normalized_records', async () => {
+    it('XML Provenance: should map XML node path to source_metadata in normalized_records', async () => {
       const xmlFeed = `<?xml version="1.0" encoding="UTF-8"?>
         <catalog>
           <product id="P-301">
@@ -417,7 +419,7 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
         'Metric balance: total_rows === valid_rows + failed_rows'
       );
 
-      // Verify records in normalized_records have source_column set to '/catalog/product'
+      // Verify records in normalized_records have source_metadata set to { xml_path: '/catalog/product' }
       const validRecordsRes = await pool.query(
         'SELECT * FROM normalized_records WHERE run_id = $1 ORDER BY sku ASC',
         [stats.runId]
@@ -430,12 +432,14 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
       assert.strictEqual(Number(row1.price), 119.95);
       // EAN padded to 13 digits
       assert.strictEqual(row1.ean, '0012345678905');
-      // PROVENANCE CHECK: node path mapped directly to source_column
-      assert.strictEqual(row1.source_column, '/catalog/product');
+      // PROVENANCE CHECK: node path mapped to source_metadata.xml_path
+      const meta1 = typeof row1.source_metadata === 'string' ? JSON.parse(row1.source_metadata) : row1.source_metadata;
+      assert.deepStrictEqual(meta1, { xml_path: '/catalog/product' });
 
       const row2 = validRecordsRes.rows[1];
       assert.strictEqual(row2.sku, 'PUCH-302');
-      assert.strictEqual(row2.source_column, '/catalog/product');
+      const meta2 = typeof row2.source_metadata === 'string' ? JSON.parse(row2.source_metadata) : row2.source_metadata;
+      assert.deepStrictEqual(meta2, { xml_path: '/catalog/product' });
 
       // Verify flagged_records
       const flaggedRes = await pool.query(
@@ -480,7 +484,8 @@ describe('User Story B4.1 (PR 1 & PR 2): Multi-Format Ingestion (XLSX, XML, & Pr
         [stats.runId]
       );
       assert.strictEqual(recordsRes.rows[0].sku, 'ITEM-999');
-      assert.strictEqual(recordsRes.rows[0].source_column, '/feed/item');
+      const meta = typeof recordsRes.rows[0].source_metadata === 'string' ? JSON.parse(recordsRes.rows[0].source_metadata) : recordsRes.rows[0].source_metadata;
+      assert.deepStrictEqual(meta, { xml_path: '/feed/item' });
     });
   });
 });

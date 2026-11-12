@@ -25,33 +25,18 @@ export async function failIngestionRun(runId, errorMessage) {
 let columnsEnsured = false;
 
 /**
- * Ensures that provenance tracking columns ('page_number' and 'source_column')
- * exist in the normalized_records table.
+ * Ensures that provenance tracking column ('source_metadata' JSONB)
+ * exists in the normalized_records table.
  */
 export async function ensureProvenanceColumns() {
   if (columnsEnsured) return;
   try {
     await pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name='normalized_records' AND column_name='page_number'
-        ) THEN
-          ALTER TABLE normalized_records ADD COLUMN page_number TEXT;
-        END IF;
-
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name='normalized_records' AND column_name='source_column'
-        ) THEN
-          ALTER TABLE normalized_records ADD COLUMN source_column TEXT;
-        END IF;
-      END $$;
+      ALTER TABLE normalized_records ADD COLUMN IF NOT EXISTS source_metadata JSONB DEFAULT '{}'::jsonb;
     `);
     columnsEnsured = true;
   } catch (err) {
-    console.error('Failed to ensure provenance columns in normalized_records:', err);
+    console.error('Failed to ensure source_metadata column in normalized_records:', err);
   }
 }
 

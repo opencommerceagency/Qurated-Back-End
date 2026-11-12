@@ -11,7 +11,7 @@ import { ensureProvenanceColumns } from '../db/ingestionHelpers.js';
  * or truncated EAN barcodes.
  *
  * Provenance Mapping:
- * Maps the Excel worksheet name directly to the `page_number` column in `normalized_records`.
+ * Maps the Excel worksheet name directly to the `source_metadata` JSONB column in `normalized_records`.
  */
 
 /**
@@ -140,7 +140,7 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
 
   let resolvedSheet = 'Sheet1';
 
-  // Chunked batch flush for valid normalized records (including page_number provenance)
+  // Chunked batch flush for valid normalized records (including source_metadata provenance)
   const flushCleanBatch = async () => {
     if (cleanBatch.length === 0) return;
     const batch = [...cleanBatch];
@@ -165,13 +165,13 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
         rec.unit_value,
         rec.unit_type,
         JSON.stringify(rec.raw_data),
-        rec.page_number || resolvedSheet
+        JSON.stringify(rec.source_metadata || { sheet_name: resolvedSheet })
       );
     }
 
     const query = `
       INSERT INTO normalized_records (
-        run_id, merchant_id, sku, name, price, currency, ean, unit_value, unit_type, raw_data, page_number
+        run_id, merchant_id, sku, name, price, currency, ean, unit_value, unit_type, raw_data, source_metadata
       ) VALUES ${placeholders.join(', ')}
     `;
     await pool.query(query, values);
@@ -233,7 +233,7 @@ export async function ingestXlsxStream(streamOrBuffer, source, merchantId, runId
         validRowsCount++;
         cleanBatch.push({
           ...result.normalized,
-          page_number: resolvedSheet
+          source_metadata: { sheet_name: resolvedSheet }
         });
       } else {
         failedRowsCount++;

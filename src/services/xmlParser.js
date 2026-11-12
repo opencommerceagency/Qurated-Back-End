@@ -12,7 +12,7 @@ import { ensureProvenanceColumns } from '../db/ingestionHelpers.js';
  *
  * Provenance Mapping:
  * Maps the structural XML node path (e.g. '/catalog/products/product') directly to the
- * `source_column` column in `normalized_records`.
+ * `source_metadata` JSONB column in `normalized_records`.
  */
 
 /**
@@ -187,7 +187,7 @@ export async function ingestXmlStream(streamOrTarget, source, merchantId, runId)
   let failedRowsCount = 0;
   let rowIndex = 0;
 
-  // Chunked batch flush for valid normalized records (including source_column provenance)
+  // Chunked batch flush for valid normalized records (including source_metadata provenance)
   const flushCleanBatch = async () => {
     if (cleanBatch.length === 0) return;
     const batch = [...cleanBatch];
@@ -212,13 +212,13 @@ export async function ingestXmlStream(streamOrTarget, source, merchantId, runId)
         rec.unit_value,
         rec.unit_type,
         JSON.stringify(rec.raw_data),
-        rec.source_column || null
+        JSON.stringify(rec.source_metadata || {})
       );
     }
 
     const query = `
       INSERT INTO normalized_records (
-        run_id, merchant_id, sku, name, price, currency, ean, unit_value, unit_type, raw_data, source_column
+        run_id, merchant_id, sku, name, price, currency, ean, unit_value, unit_type, raw_data, source_metadata
       ) VALUES ${placeholders.join(', ')}
     `;
     await pool.query(query, values);
@@ -349,7 +349,7 @@ export async function ingestXmlStream(streamOrTarget, source, merchantId, runId)
           validRowsCount++;
           cleanBatch.push({
             ...evaluated.normalized,
-            source_column: itemNodePath
+            source_metadata: { xml_path: itemNodePath }
           });
         } else {
           failedRowsCount++;
