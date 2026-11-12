@@ -1,6 +1,6 @@
 # Aikido Security CLI Setup & Usage
 
-Aikido Security provides a unified developer-first software security platform. We use it to run scans on our repository locally before code is committed to avoid shipping vulnerabilities, leaked secrets, or IaC misconfigurations.
+Aikido Security provides a unified developer-first software security platform. I use it to run scans on my repository locally before code is committed to avoid shipping vulnerabilities, leaked secrets, or IaC misconfigurations.
 
 ## 1. Authentication
 Before running the CLI, you must log in and link your local machine to the Aikido workspace:

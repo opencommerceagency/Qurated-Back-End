@@ -1,5 +1,5 @@
 -- Up Migration
--- this sets up the initial tables so sources and runs can be stored safely
+-- Initial schema for sources, ingestion runs, and flagged records
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS flagged_records (
 );
 
 -- Down Migration
--- this rolls back the initial tables if we ever need to undo
+-- Down migration: drops initial tables on rollback
 DROP TABLE IF EXISTS flagged_records;
 DROP TABLE IF EXISTS ingestion_runs;
 DROP TABLE IF EXISTS sources;
