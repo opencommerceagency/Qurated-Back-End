@@ -141,13 +141,29 @@ async function callModelWithSchema({
     }
 
     const jsonRes = await response.json();
+    const promptTokens = jsonRes.usage?.prompt_tokens ?? 0;
+    const completionTokens = jsonRes.usage?.completion_tokens ?? 0;
+    const actualModel = jsonRes.model || modelName;
+
     const rawContent = jsonRes.choices?.[0]?.message?.content;
     if (!rawContent) {
-      throw new Error('Empty response content received from model');
+      const emptyErr = new Error('Empty response content received from model');
+      emptyErr.prompt_tokens = promptTokens;
+      emptyErr.completion_tokens = completionTokens;
+      emptyErr.model_used = actualModel;
+      throw emptyErr;
     }
 
-    const cleanContent = sanitizeJsonResponse(rawContent);
-    const parsedData = JSON.parse(cleanContent);
+    let parsedData;
+    try {
+      const cleanContent = sanitizeJsonResponse(rawContent);
+      parsedData = JSON.parse(cleanContent);
+    } catch (parseErr) {
+      parseErr.prompt_tokens = promptTokens;
+      parseErr.completion_tokens = completionTokens;
+      parseErr.model_used = actualModel;
+      throw parseErr;
+    }
 
     // Validate and coerce against compiled schema
     // If output is wrapped in a top-level key like { "product": ... } or { "products": [...] }, unwrap it
@@ -159,13 +175,26 @@ async function callModelWithSchema({
       }
     }
 
-    if (Array.isArray(targetPayload)) {
-      const validatedItems = targetPayload.map((item) => compiledSchema.parse(item));
-      return validatedItems;
+    let validatedData;
+    try {
+      if (Array.isArray(targetPayload)) {
+        validatedData = targetPayload.map((item) => compiledSchema.parse(item));
+      } else {
+        validatedData = compiledSchema.parse(targetPayload);
+      }
+    } catch (valErr) {
+      valErr.prompt_tokens = promptTokens;
+      valErr.completion_tokens = completionTokens;
+      valErr.model_used = actualModel;
+      throw valErr;
     }
 
-    const validatedItem = compiledSchema.parse(targetPayload);
-    return validatedItem;
+    return {
+      data: validatedData,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      model_used: actualModel
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -203,10 +232,11 @@ export async function extractWithFallback({
 
   const timeoutMs = getExtractionTimeoutMs(fileType, options.timeoutMs);
   const compiledSchema = compileModelZodSchema(schemaSnapshot);
+  const attempts = [];
 
   // 1. Primary Model Attempt
   try {
-    const data = await callModelWithSchema({
+    const primaryResult = await callModelWithSchema({
       modelName: primaryModel,
       rawData,
       schemaSnapshot,
@@ -217,16 +247,51 @@ export async function extractWithFallback({
       fetchFn
     });
 
+    const primaryAttempt = {
+      model_used: primaryResult.model_used || primaryModel,
+      prompt_tokens: primaryResult.prompt_tokens || 0,
+      completion_tokens: primaryResult.completion_tokens || 0,
+      is_failover: false,
+      status: 'success'
+    };
+    attempts.push(primaryAttempt);
+
+    if (typeof options.onAttempt === 'function') {
+      await options.onAttempt(primaryAttempt);
+    }
+
     return {
-      data,
+      data: primaryResult.data,
       metadata: {
         model_used: 'primary',
-        model_name: primaryModel,
-        timeout_ms: timeoutMs
-      }
+        model_name: primaryResult.model_used || primaryModel,
+        prompt_tokens: primaryResult.prompt_tokens || 0,
+        completion_tokens: primaryResult.completion_tokens || 0,
+        timeout_ms: timeoutMs,
+        attempts
+      },
+      model_used: primaryResult.model_used || primaryModel,
+      prompt_tokens: primaryResult.prompt_tokens || 0,
+      completion_tokens: primaryResult.completion_tokens || 0,
+      attempts
     };
   } catch (primaryErr) {
+    const primaryAttempt = {
+      model_used: primaryErr.model_used || primaryModel,
+      prompt_tokens: primaryErr.prompt_tokens || 0,
+      completion_tokens: primaryErr.completion_tokens || 0,
+      is_failover: false,
+      status: 'error',
+      error_message: primaryErr.message
+    };
+    attempts.push(primaryAttempt);
+
+    if (typeof options.onAttempt === 'function') {
+      await options.onAttempt(primaryAttempt);
+    }
+
     if (!isFallbackEligibleError(primaryErr)) {
+      primaryErr.attempts = attempts;
       throw primaryErr;
     }
 
@@ -237,7 +302,7 @@ export async function extractWithFallback({
 
     // 2. Fallover Execution to Fallback Model
     try {
-      const fallbackData = await callModelWithSchema({
+      const fallbackResult = await callModelWithSchema({
         modelName: fallbackModel,
         rawData,
         schemaSnapshot,
@@ -248,22 +313,91 @@ export async function extractWithFallback({
         fetchFn
       });
 
+      const fallbackAttempt = {
+        model_used: fallbackResult.model_used || fallbackModel,
+        prompt_tokens: fallbackResult.prompt_tokens || 0,
+        completion_tokens: fallbackResult.completion_tokens || 0,
+        is_failover: true,
+        status: 'success'
+      };
+      attempts.push(fallbackAttempt);
+
+      if (typeof options.onAttempt === 'function') {
+        await options.onAttempt(fallbackAttempt);
+      }
+
       return {
-        data: fallbackData,
+        data: fallbackResult.data,
         metadata: {
           model_used: 'fallback',
-          model_name: fallbackModel,
+          model_name: fallbackResult.model_used || fallbackModel,
+          prompt_tokens: fallbackResult.prompt_tokens || 0,
+          completion_tokens: fallbackResult.completion_tokens || 0,
           primary_error: primaryErr.message,
-          timeout_ms: timeoutMs
-        }
+          timeout_ms: timeoutMs,
+          attempts
+        },
+        model_used: fallbackResult.model_used || fallbackModel,
+        prompt_tokens: fallbackResult.prompt_tokens || 0,
+        completion_tokens: fallbackResult.completion_tokens || 0,
+        attempts
       };
     } catch (fallbackErr) {
-      throw new Error(
+      const fallbackAttempt = {
+        model_used: fallbackErr.model_used || fallbackModel,
+        prompt_tokens: fallbackErr.prompt_tokens || 0,
+        completion_tokens: fallbackErr.completion_tokens || 0,
+        is_failover: true,
+        status: 'error',
+        error_message: fallbackErr.message
+      };
+      attempts.push(fallbackAttempt);
+
+      if (typeof options.onAttempt === 'function') {
+        await options.onAttempt(fallbackAttempt);
+      }
+
+      const totalErr = new Error(
         `AI extraction failed on both primary (${primaryModel}) and fallback (${fallbackModel}) models. ` +
         `Primary error: ${primaryErr.message}. Fallback error: ${fallbackErr.message}`
       );
+      totalErr.attempts = attempts;
+      throw totalErr;
     }
   }
+}
+
+/**
+ * Extracts product attributes and returns token usage metrics.
+ *
+ * @param {...any} args - Can be called as (rawData, schemaSnapshot, options) or ({ rawData, schemaSnapshot, options })
+ * @returns {Promise<Object>} Extracted product attributes with token telemetry
+ */
+export async function extractProductAttributes(...args) {
+  let params;
+  if (args.length === 1 && typeof args[0] === 'object' && ('rawData' in args[0] || 'text' in args[0])) {
+    const raw = args[0].rawData || args[0].text;
+    params = {
+      rawData: raw,
+      fileType: args[0].fileType || 'csv',
+      schemaSnapshot: args[0].schemaSnapshot || args[0].modelSnapshot,
+      options: args[0].options || args[0]
+    };
+  } else {
+    const [rawData, schemaSnapshot, options] = args;
+    params = { rawData, schemaSnapshot, options: options || {} };
+  }
+
+  const result = await extractWithFallback(params);
+  return {
+    attributes: result.data,
+    data: result.data,
+    model_used: result.model_used,
+    prompt_tokens: result.prompt_tokens,
+    completion_tokens: result.completion_tokens,
+    metadata: result.metadata,
+    attempts: result.attempts
+  };
 }
 
 export default {
@@ -272,5 +406,6 @@ export default {
   getExtractionTimeoutMs,
   sanitizeJsonResponse,
   isFallbackEligibleError,
-  extractWithFallback
+  extractWithFallback,
+  extractProductAttributes
 };

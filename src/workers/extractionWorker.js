@@ -80,6 +80,52 @@ export function normalizeBoundingBox(bbox, pageSize = { width: 1000, height: 100
 }
 
 /**
+ * Records an extraction telemetry metric entry into the extraction_metrics table.
+ *
+ * @param {Object} dbClient - PostgreSQL client or pool
+ * @param {Object} params - Telemetry metric payload
+ * @param {string} params.jobId - Extraction job UUID
+ * @param {string} [params.productId=null] - Optional product UUID
+ * @param {string} params.modelUsed - Model identifier
+ * @param {number} [params.promptTokens=0] - Prompt tokens consumed
+ * @param {number} [params.completionTokens=0] - Completion tokens consumed
+ * @param {boolean} [params.isFailover=false] - Whether this was a fallback attempt
+ * @param {string} [params.status='success'] - 'success' or 'error'
+ * @param {string} [params.errorMessage=null] - Error message if failed
+ * @returns {Promise<Object>} Created extraction metric record
+ */
+export async function recordExtractionMetric(dbClient, {
+  jobId,
+  productId = null,
+  modelUsed,
+  promptTokens = 0,
+  completionTokens = 0,
+  isFailover = false,
+  status = 'success',
+  errorMessage = null
+}) {
+  const res = await dbClient.query(
+    `INSERT INTO extraction_metrics (
+       job_id, product_id, model_used, prompt_tokens, completion_tokens,
+       is_failover, status, error_message, created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+     RETURNING id, job_id, product_id, model_used, prompt_tokens, completion_tokens, is_failover, status, created_at`,
+    [
+      jobId,
+      productId,
+      modelUsed,
+      promptTokens,
+      completionTokens,
+      Boolean(isFailover),
+      status,
+      errorMessage ? String(errorMessage).slice(0, 1000) : null
+    ]
+  );
+  return res.rows[0];
+}
+
+/**
  * Ingests an extracted product and its attributes idempotently into PostgreSQL within an atomic transaction:
  * - UPSERT into extracted_products on (merchant_id, model_version_id, supplier_sku)
  * - UPSERT into extracted_attributes on (product_id, attribute_key) with provenance and confidence score
@@ -481,19 +527,78 @@ export async function processJob(jobId, options = {}, client = pool) {
               : rawItem;
 
           // Optional AI extraction step
+          const itemMetricIds = [];
           if (options.useAi && schemaSnapshot) {
-            const aiResult = await extractWithFallback({
-              rawData: rawItem,
-              fileType,
-              schemaSnapshot,
-              options
-            });
-            processedData = aiResult.data;
-            if (aiResult.metadata) {
-              aiMetadataList.push({
-                item_index: itemIndex,
-                ...aiResult.metadata
+            try {
+              const aiResult = await extractWithFallback({
+                rawData: rawItem,
+                fileType,
+                schemaSnapshot,
+                options: {
+                  ...options,
+                  onAttempt: async (attempt) => {
+                    try {
+                      const metric = await recordExtractionMetric(client, {
+                        jobId,
+                        productId: null,
+                        modelUsed: attempt.model_used,
+                        promptTokens: attempt.prompt_tokens,
+                        completionTokens: attempt.completion_tokens,
+                        isFailover: attempt.is_failover,
+                        status: attempt.status,
+                        errorMessage: attempt.error_message
+                      });
+                      if (metric?.id) itemMetricIds.push(metric.id);
+                    } catch (mErr) {
+                      console.error('[ExtractionWorker] Failed to record extraction metric:', mErr.message);
+                    }
+                  }
+                }
               });
+              processedData = aiResult.data;
+              if (aiResult.metadata) {
+                aiMetadataList.push({
+                  item_index: itemIndex,
+                  ...aiResult.metadata
+                });
+              }
+            } catch (aiErr) {
+              if (itemMetricIds.length === 0 && aiErr.attempts && aiErr.attempts.length > 0) {
+                for (const attempt of aiErr.attempts) {
+                  try {
+                    const metric = await recordExtractionMetric(client, {
+                      jobId,
+                      productId: null,
+                      modelUsed: attempt.model_used,
+                      promptTokens: attempt.prompt_tokens,
+                      completionTokens: attempt.completion_tokens,
+                      isFailover: attempt.is_failover,
+                      status: attempt.status,
+                      errorMessage: attempt.error_message
+                    });
+                    if (metric?.id) itemMetricIds.push(metric.id);
+                  } catch (mErr) {
+                    console.error('[ExtractionWorker] Failed to record error metric:', mErr.message);
+                  }
+                }
+              } else if (itemMetricIds.length === 0) {
+                try {
+                  const metric = await recordExtractionMetric(client, {
+                    jobId,
+                    productId: null,
+                    modelUsed: options.primaryModel || process.env.OPENROUTER_PRIMARY_MODEL || 'anthropic/claude-3.5-sonnet',
+                    promptTokens: 0,
+                    completionTokens: 0,
+                    isFailover: false,
+                    status: 'error',
+                    errorMessage: aiErr.message
+                  });
+                  if (metric?.id) itemMetricIds.push(metric.id);
+                } catch (mErr) {
+                  console.error('[ExtractionWorker] Failed to record error metric:', mErr.message);
+                }
+              }
+              throw aiErr;
             }
           }
 
@@ -659,7 +764,7 @@ export async function processJob(jobId, options = {}, client = pool) {
               job.merchant_id &&
               job.model_version_id
             ) {
-              await ingestExtractedProduct(
+              const ingestResult = await ingestExtractedProduct(
                 {
                   merchant_id: job.merchant_id,
                   job_id: jobId,
@@ -681,6 +786,13 @@ export async function processJob(jobId, options = {}, client = pool) {
                 },
                 client
               );
+
+              if (itemMetricIds.length > 0 && ingestResult?.productId) {
+                await client.query(
+                  `UPDATE extraction_metrics SET product_id = $1 WHERE id = ANY($2::uuid[])`,
+                  [ingestResult.productId, itemMetricIds]
+                );
+              }
             }
 
             processedRecords++;
@@ -701,7 +813,7 @@ export async function processJob(jobId, options = {}, client = pool) {
               job.model_version_id
             ) {
               const sku = processedData.supplier_sku || processedData.sku;
-              await client.query(
+              const failedProdRes = await client.query(
                 `INSERT INTO extracted_products (
                    merchant_id, job_id, model_version_id, supplier_sku, state, updated_at
                  )
@@ -710,9 +822,17 @@ export async function processJob(jobId, options = {}, client = pool) {
                  DO UPDATE SET
                    job_id = EXCLUDED.job_id,
                    state = 'FAILED_EXTRACTION',
-                   updated_at = NOW()`,
+                   updated_at = NOW()
+                 RETURNING id`,
                 [job.merchant_id, jobId, job.model_version_id, String(sku).trim()]
               );
+
+              if (itemMetricIds.length > 0 && failedProdRes.rows[0]?.id) {
+                await client.query(
+                  `UPDATE extraction_metrics SET product_id = $1 WHERE id = ANY($2::uuid[])`,
+                  [failedProdRes.rows[0].id, itemMetricIds]
+                );
+              }
             }
           }
         } catch (itemErr) {
@@ -876,6 +996,7 @@ export function stopExtractionWorker() {
 export default {
   calculateBackoffMs,
   normalizeBoundingBox,
+  recordExtractionMetric,
   ingestExtractedProduct,
   processJob,
   processNextJob,
